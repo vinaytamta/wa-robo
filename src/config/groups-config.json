@@ -1,0 +1,14 @@
+{
+  "groups": [
+    {
+      "name": "LawSikho Marketing Thinktank",
+      "enabled": true,
+      "notes": ""
+    }
+  ],
+  "config": {
+    "autoDiscoverNewGroups": false,
+    "matchStrategy": "exact",
+    "notes": "matchStrategy options: 'exact' (case-sensitive exact match) or 'fuzzy' (partial match)"
+  }
+}

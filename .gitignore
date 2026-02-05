@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+
+# Environment variables
+.env
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# WhatsApp session data
+.wwebjs_auth/
+.wwebjs_cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Database files
+*.db
+*.sqlite
+
+# Temporary files
+tmp/
+temp/
+
+# Distribution files
+dist/
+
+# Electron files
+electron/
+build/icon.*
+build/*.icns
+build/*.ico
+build/*.png
+
+# Session data
+.wwebjs_sessions/
+
+# Claude files
+.claude/
+
+# Other project folders
+admin-panel/
+groupiq-dashboard-v1/

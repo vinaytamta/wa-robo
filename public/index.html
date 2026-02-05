@@ -1,0 +1,502 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WhatsApp Scraper Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .header h1 {
+            color: #333;
+            font-size: 28px;
+            margin-bottom: 8px;
+        }
+
+        .header p {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .user-info {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .user-name {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .logout-btn {
+            padding: 8px 16px;
+            background: #ef4444;
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-size: 14px;
+            cursor: pointer;
+            transition: background 0.2s;
+        }
+
+        .logout-btn:hover {
+            background: #dc2626;
+        }
+
+        .status-badge {
+            display: inline-block;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+            margin-top: 12px;
+        }
+
+        .status-initializing {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-waiting-for-qr {
+            background: #dbeafe;
+            color: #1e3a8a;
+        }
+
+        .status-authenticating {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .status-ready {
+            background: #d1fae5;
+            color: #065f46;
+        }
+
+        .status-scraping {
+            background: #e0e7ff;
+            color: #3730a3;
+        }
+
+        .status-error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        @media (max-width: 768px) {
+            .grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        .card {
+            background: white;
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .card h2 {
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 16px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .qr-container {
+            text-align: center;
+            min-height: 300px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #qrCode {
+            max-width: 256px;
+            margin: 0 auto;
+        }
+
+        #qrCode img {
+            width: 100%;
+            height: auto;
+            border: 4px solid #f3f4f6;
+            border-radius: 8px;
+        }
+
+        .qr-placeholder {
+            color: #9ca3af;
+            font-size: 14px;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+        }
+
+        .stat-item {
+            text-align: center;
+            padding: 16px;
+            background: #f9fafb;
+            border-radius: 8px;
+        }
+
+        .stat-value {
+            font-size: 32px;
+            font-weight: bold;
+            color: #667eea;
+            margin-bottom: 4px;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #6b7280;
+            text-transform: uppercase;
+            font-weight: 600;
+        }
+
+        .logs-container {
+            grid-column: 1 / -1;
+        }
+
+        .logs {
+            background: #1f2937;
+            border-radius: 8px;
+            padding: 16px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+        }
+
+        .log-entry {
+            margin-bottom: 8px;
+            line-height: 1.5;
+        }
+
+        .log-timestamp {
+            color: #9ca3af;
+        }
+
+        .log-level {
+            font-weight: bold;
+            margin: 0 8px;
+        }
+
+        .log-level-info {
+            color: #60a5fa;
+        }
+
+        .log-level-warn {
+            color: #fbbf24;
+        }
+
+        .log-level-error {
+            color: #f87171;
+        }
+
+        .log-level-debug {
+            color: #a78bfa;
+        }
+
+        .log-message {
+            color: #d1d5db;
+        }
+
+        .icon {
+            width: 20px;
+            height: 20px;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 2px solid #f3f4f6;
+            border-radius: 50%;
+            border-top-color: #667eea;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        .instructions {
+            background: #eff6ff;
+            border-left: 4px solid #3b82f6;
+            padding: 16px;
+            border-radius: 4px;
+            margin-top: 16px;
+        }
+
+        .instructions h3 {
+            color: #1e40af;
+            font-size: 14px;
+            margin-bottom: 8px;
+        }
+
+        .instructions ol {
+            color: #1e3a8a;
+            font-size: 13px;
+            padding-left: 20px;
+        }
+
+        .instructions li {
+            margin-bottom: 4px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="header-content">
+                <div>
+                    <h1>🤖 WhatsApp Scraper Dashboard</h1>
+                    <p>Real-time monitoring and control panel</p>
+                </div>
+                <div class="user-info">
+                    <span class="user-name" id="userName">Loading...</span>
+                    <button class="logout-btn" onclick="logout()">Logout</button>
+                </div>
+            </div>
+            <span id="statusBadge" class="status-badge status-initializing">Initializing</span>
+        </div>
+
+        <div class="grid">
+            <div class="card">
+                <h2>
+                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8h2a1 1 0 001-1V5a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1zm12 0h2a1 1 0 001-1V5a1 1 0 00-1-1h-2a1 1 0 00-1 1v2a1 1 0 001 1zM5 20h2a1 1 0 001-1v-2a1 1 0 00-1-1H5a1 1 0 00-1 1v2a1 1 0 001 1z"></path>
+                    </svg>
+                    WhatsApp Authentication
+                </h2>
+                <div class="qr-container">
+                    <div id="qrCode">
+                        <div class="qr-placeholder">
+                            <div class="spinner"></div>
+                            <p style="margin-top: 16px;">Waiting for QR code...</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="instructions">
+                    <h3>📱 How to Authenticate:</h3>
+                    <ol>
+                        <li>Open WhatsApp on your phone</li>
+                        <li>Tap Menu or Settings → Linked Devices</li>
+                        <li>Tap "Link a Device"</li>
+                        <li>Scan the QR code above</li>
+                    </ol>
+                </div>
+            </div>
+
+            <div class="card">
+                <h2>
+                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
+                    </svg>
+                    Scraping Statistics
+                </h2>
+                <div class="stats-grid">
+                    <div class="stat-item">
+                        <div class="stat-value" id="groupsChecked">0</div>
+                        <div class="stat-label">Groups</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="messagesProcessed">0</div>
+                        <div class="stat-label">Messages</div>
+                    </div>
+                    <div class="stat-item">
+                        <div class="stat-value" id="errorsCount">0</div>
+                        <div class="stat-label">Errors</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card logs-container">
+                <h2>
+                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path>
+                    </svg>
+                    Real-time Logs
+                </h2>
+                <div class="logs" id="logs">
+                    <div class="log-entry">
+                        <span class="log-timestamp">Waiting for logs...</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Check authentication before loading dashboard
+        checkAuth();
+
+        async function checkAuth() {
+            try {
+                const response = await fetch('/api/auth/me', {
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    // Not authenticated, redirect to login
+                    window.location.href = '/login.html';
+                    return;
+                }
+
+                const data = await response.json();
+                document.getElementById('userName').textContent = data.user.username || data.user.email;
+            } catch (error) {
+                // Error checking auth, redirect to login
+                window.location.href = '/login.html';
+            }
+        }
+
+        async function logout() {
+            try {
+                await fetch('/api/auth/logout', {
+                    method: 'POST',
+                    credentials: 'include'
+                });
+            } catch (error) {
+                console.error('Logout error:', error);
+            } finally {
+                window.location.href = '/login.html';
+            }
+        }
+
+        const eventSource = new EventSource('/events');
+        const logsContainer = document.getElementById('logs');
+        const statusBadge = document.getElementById('statusBadge');
+        const qrCodeDiv = document.getElementById('qrCode');
+
+        // Handle status updates
+        eventSource.addEventListener('status', (event) => {
+            const data = JSON.parse(event.data);
+            updateStatus(data.status);
+        });
+
+        // Handle QR code updates
+        eventSource.addEventListener('qr', (event) => {
+            const data = JSON.parse(event.data);
+            if (data.qr) {
+                qrCodeDiv.innerHTML = `<img src="${data.qr}" alt="WhatsApp QR Code" />`;
+            } else {
+                qrCodeDiv.innerHTML = `
+                    <div class="qr-placeholder">
+                        <div class="spinner"></div>
+                        <p style="margin-top: 16px;">Waiting for QR code...</p>
+                    </div>
+                `;
+            }
+        });
+
+        // Handle stats updates
+        eventSource.addEventListener('stats', (event) => {
+            const data = JSON.parse(event.data);
+            document.getElementById('groupsChecked').textContent = data.groupsChecked || 0;
+            document.getElementById('messagesProcessed').textContent = data.messagesProcessed || 0;
+            document.getElementById('errorsCount').textContent = data.errorsCount || 0;
+        });
+
+        // Handle log updates
+        eventSource.addEventListener('log', (event) => {
+            const log = JSON.parse(event.data);
+            addLog(log);
+        });
+
+        // Handle initial logs
+        eventSource.addEventListener('logs', (event) => {
+            const data = JSON.parse(event.data);
+            logsContainer.innerHTML = '';
+            data.logs.forEach(log => addLog(log));
+        });
+
+        function updateStatus(status) {
+            statusBadge.className = `status-badge status-${status.replace(/_/g, '-')}`;
+            statusBadge.textContent = status.replace(/_/g, ' ').toUpperCase();
+        }
+
+        function addLog(log) {
+            const logEntry = document.createElement('div');
+            logEntry.className = 'log-entry';
+
+            const timestamp = new Date(log.timestamp).toLocaleTimeString();
+            const levelClass = `log-level-${log.level}`;
+
+            logEntry.innerHTML = `
+                <span class="log-timestamp">[${timestamp}]</span>
+                <span class="log-level ${levelClass}">${log.level.toUpperCase()}</span>
+                <span class="log-message">${escapeHtml(log.message)}</span>
+            `;
+
+            logsContainer.appendChild(logEntry);
+            logsContainer.scrollTop = logsContainer.scrollHeight;
+
+            // Keep only last 100 logs in DOM
+            while (logsContainer.children.length > 100) {
+                logsContainer.removeChild(logsContainer.firstChild);
+            }
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Handle connection errors
+        eventSource.onerror = (error) => {
+            console.error('EventSource error:', error);
+            addLog({
+                timestamp: new Date().toISOString(),
+                level: 'error',
+                message: 'Connection to server lost. Attempting to reconnect...'
+            });
+        };
+    </script>
+</body>
+</html>
