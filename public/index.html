@@ -245,6 +245,69 @@
             color: #d1d5db;
         }
 
+        /* WhatsApp Connect Button */
+        .whatsapp-control {
+            text-align: center;
+            padding: 24px;
+            display: none; /* Hidden by default, shown only in Electron */
+        }
+
+        .whatsapp-control.electron-only {
+            display: block;
+        }
+
+        .connect-btn {
+            padding: 16px 32px;
+            background: linear-gradient(135deg, #25D366 0%, #128C7E 100%);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 18px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+            box-shadow: 0 4px 6px rgba(37, 211, 102, 0.3);
+            display: inline-flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .connect-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 12px rgba(37, 211, 102, 0.4);
+        }
+
+        .connect-btn:active {
+            transform: translateY(0);
+        }
+
+        .connect-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        .connect-btn.connected {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .connect-btn.disconnected {
+            background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+        }
+
+        .web-only-message {
+            display: none;
+            text-align: center;
+            padding: 24px;
+            background: #fef3c7;
+            border-radius: 8px;
+            color: #92400e;
+        }
+
+        .web-only-message.show {
+            display: block;
+        }
+
         .icon {
             width: 20px;
             height: 20px;
@@ -313,6 +376,25 @@
                     </svg>
                     WhatsApp Authentication
                 </h2>
+
+                <!-- Electron-only: Connect WhatsApp button -->
+                <div class="whatsapp-control" id="whatsappControl">
+                    <button class="connect-btn" id="connectBtn" onclick="toggleWhatsApp()">
+                        <svg width="24" height="24" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347m-5.421 7.403h-.004a9.87 9.87 0 01-5.031-1.378l-.361-.214-3.741.982.998-3.648-.235-.374a9.86 9.86 0 01-1.51-5.26c.001-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 012.893 6.994c-.003 5.45-4.437 9.884-9.885 9.884m8.413-18.297A11.815 11.815 0 0012.05 0C5.495 0 .16 5.335.157 11.892c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.882 11.882 0 005.683 1.448h.005c6.554 0 11.89-5.335 11.893-11.893a11.821 11.821 0 00-3.48-8.413z"/>
+                        </svg>
+                        <span id="btnText">Connect WhatsApp</span>
+                    </button>
+                    <p style="margin-top: 12px; font-size: 14px; color: #666;" id="whatsappStatus">Not connected</p>
+                </div>
+
+                <!-- Web-only: Message about downloading app -->
+                <div class="web-only-message" id="webOnlyMessage">
+                    <p style="font-size: 16px; font-weight: 600; margin-bottom: 8px;">📱 Connect WhatsApp</p>
+                    <p style="font-size: 14px;">To connect your WhatsApp, please download and install the desktop app.</p>
+                    <p style="font-size: 12px; margin-top: 8px; color: #78350f;">This dashboard is view-only. Use the app for full features.</p>
+                </div>
+
                 <div class="qr-container">
                     <div id="qrCode">
                         <div class="qr-placeholder">
@@ -372,6 +454,145 @@
     </div>
 
     <script>
+        // Detect if running in Electron
+        const isElectron = window.electron && window.electron.isElectron;
+        let whatsappConnected = false;
+
+        // Show/hide controls based on environment
+        window.addEventListener('DOMContentLoaded', () => {
+            const whatsappControl = document.getElementById('whatsappControl');
+            const webOnlyMessage = document.getElementById('webOnlyMessage');
+
+            if (isElectron) {
+                whatsappControl.classList.add('electron-only');
+                webOnlyMessage.classList.remove('show');
+                checkWhatsAppStatus();
+                setupWhatsAppListeners();
+            } else {
+                whatsappControl.classList.remove('electron-only');
+                webOnlyMessage.classList.add('show');
+            }
+        });
+
+        // WhatsApp control functions (Electron only)
+        async function toggleWhatsApp() {
+            if (!isElectron) return;
+
+            const connectBtn = document.getElementById('connectBtn');
+            const btnText = document.getElementById('btnText');
+            const whatsappStatus = document.getElementById('whatsappStatus');
+
+            try {
+                if (!whatsappConnected) {
+                    // Start WhatsApp
+                    connectBtn.disabled = true;
+                    btnText.textContent = 'Connecting...';
+                    whatsappStatus.textContent = 'Starting WhatsApp client...';
+
+                    const userData = {
+                        token: getCookie('session_token'),
+                        userId: window.currentUser?.id
+                    };
+
+                    const result = await window.electron.startWhatsApp(userData);
+
+                    if (result.success) {
+                        whatsappConnected = true;
+                        connectBtn.classList.add('connected');
+                        btnText.textContent = 'Disconnect';
+                        whatsappStatus.textContent = 'Connected';
+                        updateStatus('authenticating');
+                    } else {
+                        throw new Error(result.error || 'Failed to start WhatsApp');
+                    }
+                } else {
+                    // Stop WhatsApp
+                    const result = await window.electron.stopWhatsApp();
+                    if (result.success) {
+                        whatsappConnected = false;
+                        connectBtn.classList.remove('connected');
+                        connectBtn.classList.add('disconnected');
+                        btnText.textContent = 'Connect WhatsApp';
+                        whatsappStatus.textContent = 'Disconnected';
+                        updateStatus('initializing');
+                    }
+                }
+            } catch (error) {
+                console.error('WhatsApp control error:', error);
+                whatsappStatus.textContent = 'Error: ' + error.message;
+                updateStatus('error');
+            } finally {
+                connectBtn.disabled = false;
+            }
+        }
+
+        async function checkWhatsAppStatus() {
+            if (!isElectron) return;
+
+            try {
+                const status = await window.electron.getWhatsAppStatus();
+                whatsappConnected = status.running;
+
+                const connectBtn = document.getElementById('connectBtn');
+                const btnText = document.getElementById('btnText');
+                const whatsappStatus = document.getElementById('whatsappStatus');
+
+                if (whatsappConnected) {
+                    connectBtn.classList.add('connected');
+                    btnText.textContent = 'Disconnect';
+                    whatsappStatus.textContent = 'Connected';
+                } else {
+                    btnText.textContent = 'Connect WhatsApp';
+                    whatsappStatus.textContent = 'Not connected';
+                }
+            } catch (error) {
+                console.error('Failed to check WhatsApp status:', error);
+            }
+        }
+
+        function setupWhatsAppListeners() {
+            if (!isElectron) return;
+
+            window.electron.onWhatsAppLog((data) => {
+                console.log('WhatsApp:', data);
+                if (data.includes('QR_CODE:')) {
+                    const qr = data.split('QR_CODE:')[1].trim();
+                    displayQRCode(qr);
+                } else if (data.includes('WHATSAPP_READY')) {
+                    updateStatus('ready');
+                    document.getElementById('whatsappStatus').textContent = 'Ready - Scraping active';
+                }
+            });
+
+            window.electron.onWhatsAppError((data) => {
+                console.error('WhatsApp Error:', data);
+                addLog('error', data);
+            });
+
+            window.electron.onWhatsAppStopped((code) => {
+                console.log('WhatsApp stopped with code:', code);
+                whatsappConnected = false;
+                const connectBtn = document.getElementById('connectBtn');
+                const btnText = document.getElementById('btnText');
+                connectBtn.classList.remove('connected');
+                btnText.textContent = 'Connect WhatsApp';
+                document.getElementById('whatsappStatus').textContent = 'Disconnected';
+                updateStatus('initializing');
+            });
+        }
+
+        function displayQRCode(qrData) {
+            const qrContainer = document.getElementById('qrCode');
+            qrContainer.innerHTML = `<img src="https://api.qrserver.com/v1/create-qr-code/?size=256x256&data=${encodeURIComponent(qrData)}" alt="QR Code" />`;
+            updateStatus('waiting-for-qr');
+        }
+
+        function getCookie(name) {
+            const value = `; ${document.cookie}`;
+            const parts = value.split(`; ${name}=`);
+            if (parts.length === 2) return parts.pop().split(';').shift();
+        }
+
         // Check authentication before loading dashboard
         checkAuth();
 
