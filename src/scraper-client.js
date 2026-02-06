@@ -4,7 +4,7 @@ const logger = require('./utils/logger');
 const { subDays } = require('date-fns');
 
 /**
- * Local WhatsApp Scraper Client for Electron
+ * GroupIQ - Local Client for Electron
  * Runs on user's computer, syncs data to VPS
  */
 
@@ -21,7 +21,7 @@ async function startScraping() {
 
   try {
     logger.info('='.repeat(60));
-    logger.info('WhatsApp Scraper Client - Starting');
+    logger.info('GroupIQ Client - Starting');
     logger.info('='.repeat(60));
 
     // Initialize WhatsApp client

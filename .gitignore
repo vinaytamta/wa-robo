@@ -34,8 +34,7 @@ temp/
 # Distribution files
 dist/
 
-# Electron files
-electron/
+# Electron build icons only (track electron/*.js and electron/public)
 build/icon.*
 build/*.icns
 build/*.ico

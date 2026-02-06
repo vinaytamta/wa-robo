@@ -1,0 +1,69 @@
+{
+  "_comment": "Engagement Tracking Configuration - Track message engagement evolution over 30 days",
+
+  "tracking": {
+    "enabled": false,
+    "maxTrackingDays": 30,
+    "_maxTrackingDays_note": "Track messages for 30 days (user can see data in WhatsApp for 20+ days, so this works)",
+
+    "intervals": {
+      "_comment": "How often to refresh stats based on message age",
+      "0-24h": 300000,
+      "_0-24h_note": "5 minutes - Engagement actively growing",
+      "1-3d": 900000,
+      "_1-3d_note": "15 minutes - Engagement still increasing",
+      "3-7d": 3600000,
+      "_3-7d_note": "1 hour - Engagement slowing down",
+      "7-30d": 21600000,
+      "_7-30d_note": "6 hours - Catch late viewers"
+    }
+  },
+
+  "delays": {
+    "_comment": "Progressive delays based on message age - older messages need more time to load from WhatsApp servers",
+
+    "byMessageAge": {
+      "0-24h": 3000,
+      "_0-24h_note": "3 seconds for fresh messages (data cached locally)",
+      "1-7d": 8000,
+      "_1-7d_note": "8 seconds for week-old messages (server fetch needed)",
+      "7-30d": 15000,
+      "_7-30d_note": "15 seconds for old messages (remote server fetch)",
+      "30d+": 20000,
+      "_30d+_note": "20 seconds for very old messages"
+    },
+
+    "retryDelays": {
+      "_comment": "Exponential backoff multipliers for retries",
+      "fresh": 500,
+      "_fresh_note": "Base delay for fresh messages: 500ms → 1s → 2s",
+      "old": 2000,
+      "_old_note": "Base delay for old messages: 2s → 4s → 8s",
+      "veryOld": 5000,
+      "_veryOld_note": "Base delay for very old messages: 5s → 10s → 15s"
+    }
+  },
+
+  "snapshotting": {
+    "enabled": true,
+    "storeHistoricalSnapshots": true,
+    "_storeHistoricalSnapshots_note": "Store engagement snapshots at each refresh to build engagement curve",
+    "maxSnapshotsPerMessage": 100,
+    "_maxSnapshotsPerMessage_note": "Limit snapshots to prevent bloat (30 days at 6h intervals = ~120 max)"
+  },
+
+  "dataQuality": {
+    "warnIfNoChangeAfterRetries": 3,
+    "_warnIfNoChangeAfterRetries_note": "Warn user if engagement hasn't changed after N refresh attempts",
+    "skipTrackingIfEngagementPlateau": false,
+    "_skipTrackingIfEngagementPlateau_note": "Don't stop tracking even if engagement plateaus (track full 30 days)"
+  },
+
+  "_usage_notes": [
+    "KEY INSIGHT: WhatsApp DOES store read receipts for 20+ days!",
+    "The issue was our scraper being too impatient, not missing data.",
+    "Old messages need 15-20 seconds to fetch from WhatsApp servers.",
+    "This config uses progressive delays: 3s for fresh, 15s for old.",
+    "Result: Complete engagement data for all messages up to 30 days!"
+  ]
+}

@@ -4,6 +4,11 @@
       "name": "LawSikho Marketing Thinktank",
       "enabled": true,
       "notes": ""
+    },
+    {
+      "name": "FIG",
+      "enabled": true,
+      "notes": ""
     }
   ],
   "config": {

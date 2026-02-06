@@ -1,0 +1,50 @@
+{
+  "_comment": "Scraper Configuration - Adjust these values to tune data accuracy vs scraping speed",
+
+  "delays": {
+    "_comment": "All delays in milliseconds (1000ms = 1 second)",
+    "afterFetchMessages": 3000,
+    "_afterFetchMessages_note": "Delay after fetching messages before extracting info. Increase if old messages have missing data.",
+    "retryBaseDelay": 500,
+    "_retryBaseDelay_note": "Base delay for exponential backoff retries (500ms → 1000ms → 2000ms for 3 attempts)",
+    "betweenGroups": 2000,
+    "_betweenGroups_note": "Delay between processing different groups to avoid rate limiting",
+    "byMessageAge": {
+      "_comment": "Progressive delays based on message age - older messages need more time to load from WhatsApp servers",
+      "0-24h": 3000,
+      "_0-24h_note": "3 seconds for fresh messages (data cached locally)",
+      "1-7d": 8000,
+      "_1-7d_note": "8 seconds for week-old messages (server fetch needed)",
+      "7-30d": 15000,
+      "_7-30d_note": "15 seconds for old messages (remote server fetch - USER VERIFIED THIS WORKS!)",
+      "30d+": 20000,
+      "_30d+_note": "20 seconds for very old messages"
+    }
+  },
+
+  "retries": {
+    "maxAttempts": 3,
+    "_maxAttempts_note": "Number of times to retry getInfo() if it fails or returns null",
+    "enablePeriodicRetry": true,
+    "_enablePeriodicRetry_note": "Enable background retry service that checks for missing data every 5 minutes",
+    "periodicRetryInterval": 300000,
+    "_periodicRetryInterval_note": "How often to run retry check in milliseconds (300000ms = 5 minutes)"
+  },
+
+  "dataQuality": {
+    "_comment": "Controls which messages get tracked by the engagement tracking service",
+    "minSeenCountThreshold": 0,
+    "retryMessagesWithZeroSeen": true,
+    "_retryMessagesWithZeroSeen_note": "Track messages with seen_count = 0 (likely missing data)",
+    "retryMessagesOlderThanDays": 30,
+    "_retryMessagesOlderThanDays_note": "Track messages up to 30 days old (user verified WhatsApp keeps data this long!)"
+  },
+
+  "_usage_notes": [
+    "CRITICAL: Data accuracy is more important than speed!",
+    "If you see many messages with seen_count=0, INCREASE afterFetchMessages delay",
+    "Recommended settings for best accuracy: afterFetchMessages=5000, maxAttempts=5",
+    "Recommended settings for faster scraping: afterFetchMessages=2000, maxAttempts=2",
+    "The periodic retry service runs in background - it won't slow down manual scraping"
+  ]
+}

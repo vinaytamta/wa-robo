@@ -1,8 +1,8 @@
 {
   "name": "wa-robo",
-  "productName": "WhatsApp Scraper",
+  "productName": "GroupIQ",
   "version": "1.0.0",
-  "description": "WhatsApp Desktop automation to track message engagement across multiple groups",
+  "description": "GroupIQ - WhatsApp message engagement tracking and analytics platform",
   "main": "electron/main.js",
   "scripts": {
     "start": "electron .",
@@ -14,7 +14,7 @@
     "setup-db": "node scripts/setup-database.js",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
-    "build:win": "electron-builder --win",
+    "build:win": "USE_HARD_LINKS=false electron-builder --win --x64",
     "build:all": "electron-builder --mac --win",
     "pack": "electron-builder --dir",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -49,9 +49,10 @@
     "nodemon": "^3.0.2"
   },
   "build": {
-    "appId": "com.groupiq.whatsapp-scraper",
-    "productName": "WhatsApp Scraper",
+    "appId": "com.groupiq.app",
+    "productName": "GroupIQ",
     "copyright": "Copyright © 2026 GroupIQ",
+    "publish": null,
     "directories": {
       "output": "dist",
       "buildResources": "build"
@@ -73,11 +74,14 @@
       "icon": "build/icon.icns"
     },
     "dmg": {
-      "title": "WhatsApp Scraper Installer",
+      "title": "GroupIQ Installer",
       "icon": "build/icon.icns"
     },
     "win": {
-      "target": ["nsis", "portable"],
+      "target": [
+        { "target": "nsis", "arch": ["x64"] },
+        { "target": "portable", "arch": ["x64"] }
+      ],
       "icon": "build/icon.ico"
     },
     "nsis": {
