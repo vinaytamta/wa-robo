@@ -1,18 +1,41 @@
 const { app, BrowserWindow, ipcMain, Tray, Menu, Notification, dialog } = require('electron');
 const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const https = require('https');
 const { spawn } = require('child_process');
 const express = require('express');
+const multer = require('multer');
 const http = require('http');
 
-// When packaged, logs must go to userData (not inside app.asar) to avoid ENOTDIR on Windows
-if (app.isPackaged && !process.env.LOGS_DIR) {
-  process.env.LOGS_DIR = path.join(app.getPath('userData'), 'logs');
+const electronConstants = require('./constants');
+
+// When packaged, logs, data, and WhatsApp session must go to userData (not inside app.asar)
+if (app.isPackaged) {
+  const userData = app.getPath('userData');
+  if (!process.env.LOGS_DIR) process.env.LOGS_DIR = path.join(userData, 'logs');
+  if (!process.env.DATA_DIR) process.env.DATA_DIR = path.join(userData, 'data');
+  if (!process.env.WWEBJS_AUTH_PATH) process.env.WWEBJS_AUTH_PATH = path.join(userData, 'wwebjs_auth');
+  // Use system Chrome on Windows so Puppeteer doesn't fail (packaged app often can't find bundled Chromium)
+  if (process.platform === 'win32' && !process.env.WA_CHROME_PATH) {
+    const chromePaths = [
+      path.join(process.env['ProgramFiles'] || 'C:\\Program Files', 'Google\\Chrome\\Application\\chrome.exe'),
+      path.join(process.env['ProgramFiles(x86)'] || 'C:\\Program Files (x86)', 'Google\\Chrome\\Application\\chrome.exe')
+    ];
+    for (const p of chromePaths) {
+      if (fs.existsSync(p)) {
+        process.env.WA_CHROME_PATH = p;
+        break;
+      }
+    }
+  }
 }
 
 const whatsappManager = require('./whatsapp-manager');
 const ScraperService = require('./scraper-service');
 const EngagementTrackingService = require('./engagement-tracking-service');
 const localDataStore = require('./local-data-store');
+const PostQueueService = require('./post-queue-service');
 
 // Environment detection
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
@@ -24,23 +47,194 @@ let localPort = 3100;
 let whatsappProcess = null;
 let sseClients = [];
 let trackingService = null;
+let postQueueService = null;
+let rendererNetworkLoggingAttached = false;
+
+// VPS auth token: stored when user logs in or sends token (e.g. scraper run); used for analytics proxy
+let storedVpsToken = null;
+let vpsTokenPathCached = null;
+function getVpsTokenPath() {
+  if (!vpsTokenPathCached) vpsTokenPathCached = path.join(app.getPath('userData'), 'vps-token.json');
+  return vpsTokenPathCached;
+}
+function loadStoredVpsToken() {
+  try {
+    const p = getVpsTokenPath();
+    if (fs.existsSync(p)) {
+      const data = JSON.parse(fs.readFileSync(p, 'utf8'));
+      if (data && data.token) {
+        storedVpsToken = data.token;
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+}
+function saveVpsToken(token) {
+  if (!token) return;
+  storedVpsToken = token;
+  try {
+    fs.writeFileSync(getVpsTokenPath(), JSON.stringify({ token }), 'utf8');
+  } catch (e) {
+    console.error('Could not persist VPS token:', e.message);
+  }
+}
+loadStoredVpsToken();
 
 // Create local Express server to serve the dashboard
 function startLocalServer() {
   return new Promise((resolve, reject) => {
     const expressApp = express();
+    // When packaged, use app.getAppPath() to get the correct path to app.asar
+    // When dev, __dirname is electron/, so ../public is correct
+    const publicDir = app.isPackaged 
+      ? path.join(app.getAppPath(), 'public')
+      : path.join(__dirname, '../public');
+    
+    // Log for debugging
+    console.log('[Server] publicDir resolved to:', publicDir);
+    console.log('[Server] publicDir exists:', fs.existsSync(publicDir));
+    console.log('[Server] index.html exists:', fs.existsSync(path.join(publicDir, 'index.html')));
+    
+    // Default to full dashboard (React UI with Compose, Send Messages). Set POSTING_FOCUSED_MODE=true for autopost at /
+    const postingFocusedMode = process.env.POSTING_FOCUSED_MODE === 'true';
 
-    // Serve static files from public directory
-    expressApp.use(express.static(path.join(__dirname, '../public')));
+    function parseDelimitedRows(inputText, explicitDelimiter = null) {
+      const text = String(inputText || '').replace(/\r\n/g, '\n').trim();
+      if (!text) return { delimiter: explicitDelimiter || ',', headers: [], rows: [] };
+      const lines = text.split('\n').filter(Boolean);
+      if (lines.length === 0) return { delimiter: explicitDelimiter || ',', headers: [], rows: [] };
+
+      const delimiter = explicitDelimiter || (lines[0].includes('\t') ? '\t' : ',');
+      const parseLine = (line) => {
+        const cells = [];
+        let current = '';
+        let inQuotes = false;
+        for (let i = 0; i < line.length; i++) {
+          const ch = line[i];
+          if (ch === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+              current += '"';
+              i += 1;
+            } else {
+              inQuotes = !inQuotes;
+            }
+            continue;
+          }
+          if (ch === delimiter && !inQuotes) {
+            cells.push(current.trim());
+            current = '';
+            continue;
+          }
+          current += ch;
+        }
+        cells.push(current.trim());
+        return cells;
+      };
+
+      const headers = parseLine(lines[0]).map(h => h.trim());
+      const rows = lines.slice(1).map(parseLine).map((cells, rowIndex) => {
+        const obj = {};
+        headers.forEach((header, idx) => {
+          obj[header] = cells[idx] || '';
+        });
+        obj.__rowNumber = rowIndex + 2;
+        return obj;
+      });
+      return { delimiter, headers, rows };
+    }
+
+    // Helper to serve HTML files (works with asar paths)
+    function serveHtmlFile(filename) {
+      return (req, res) => {
+        try {
+          const filePath = path.join(publicDir, filename);
+          if (!fs.existsSync(filePath)) {
+            console.error(`[Server] File not found: ${filePath}`);
+            return res.status(404).send('File not found');
+          }
+          const content = fs.readFileSync(filePath, 'utf8');
+          res.setHeader('Content-Type', 'text/html');
+          res.send(content);
+        } catch (error) {
+          console.error(`[Server] Error serving ${filename}:`, error);
+          res.status(500).send('Internal server error');
+        }
+      };
+    }
+
+    // Make posting-focused mode the default landing page without removing full UI.
+    // Dashboard (with Send Messages + Compose) and autopost are both in public/.
+    expressApp.get('/', (req, res) => {
+      if (postingFocusedMode) {
+        serveHtmlFile('autopost.html')(req, res);
+      } else {
+        serveHtmlFile('index.html')(req, res);
+      }
+    });
+    expressApp.get('/full-ui', serveHtmlFile('index.html'));
+    expressApp.get('/posting-ui', serveHtmlFile('autopost.html'));
+
+    expressApp.use(express.static(publicDir, { index: false }));
 
     // API proxy to VPS
-    expressApp.use('/api', require('express').json());
+    expressApp.use('/api', express.json());
 
     // Mark requests as coming from Electron
     expressApp.use((req, res, next) => {
       req.headers['x-client-type'] = 'electron';
       next();
     });
+
+    // Remember VPS token when client sends Authorization (so analytics can use it without frontend sending it every time)
+    expressApp.use('/api', (req, res, next) => {
+      const auth = req.headers.authorization;
+      if (auth && typeof auth === 'string' && auth.startsWith('Bearer ')) {
+        const token = auth.slice(7).trim();
+        if (token) saveVpsToken(token);
+      }
+      next();
+    });
+
+    const VPS_BASE_URL = process.env.VPS_BASE_URL || 'https://group-iq.com';
+    const allowInsecureSSL = process.env.ALLOW_INSECURE_SSL === 'true' || !app.isPackaged;
+    let nodeFetch = null;
+    async function getFetch() {
+      if (!nodeFetch) nodeFetch = (await import('node-fetch')).default;
+      return nodeFetch;
+    }
+    const httpsAgent = new https.Agent({ rejectUnauthorized: !allowInsecureSSL });
+
+    function sendError(res, status, message, extra = {}) {
+      res.status(status).json({ success: status < 500, error: message, ...extra });
+    }
+
+    function getGroupsConfigPath() {
+      return electronConstants.GROUPS_CONFIG_PATH;
+    }
+    function readGroupsConfig() {
+      try {
+        return JSON.parse(fs.readFileSync(getGroupsConfigPath(), 'utf8'));
+      } catch (e) {
+        return { groups: [], config: {} };
+      }
+    }
+    function writeGroupsConfig(config) {
+      fs.writeFileSync(getGroupsConfigPath(), JSON.stringify(config, null, 2));
+    }
+
+    function transformMessageForFrontend(msg) {
+      return { ...msg, id: msg.message_id, message_member_count: msg.total_members };
+    }
+
+    // Shared ScraperService instance (used by scraper/run, scraper/test, messages/refresh, tracking-service)
+    let sharedScraperService = null;
+    function getSharedScraperService() {
+      if (!sharedScraperService) {
+        sharedScraperService = new ScraperService(whatsappManager);
+      }
+      return sharedScraperService;
+    }
 
     // Local WhatsApp endpoints (not proxied to VPS)
     expressApp.get('/api/whatsapp/status', (req, res) => {
@@ -51,10 +245,7 @@ function startLocalServer() {
           ...status
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -77,10 +268,7 @@ function startLocalServer() {
           status: status.status
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -140,7 +328,7 @@ function startLocalServer() {
         if (!res.writableEnded) {
           res.write(':heartbeat\n\n');
         }
-      }, 30000);
+      }, electronConstants.SSE_HEARTBEAT_MS);
 
       // Clean up on client disconnect
       req.on('close', () => {
@@ -178,10 +366,7 @@ function startLocalServer() {
           status: status.status
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -201,10 +386,7 @@ function startLocalServer() {
           message: 'WhatsApp client disconnected'
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -224,10 +406,7 @@ function startLocalServer() {
           message: 'WhatsApp logged out successfully'
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -251,11 +430,328 @@ function startLocalServer() {
           count: groups.length
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
+    });
+
+    expressApp.get('/api/posting/settings', (req, res) => {
+      try {
+        res.json({
+          success: true,
+          settings: postQueueService.getSettings()
+        });
+      } catch (error) {
+        sendError(res, 500, error.message);
+      }
+    });
+
+    expressApp.patch('/api/posting/settings', (req, res) => {
+      try {
+        const settings = postQueueService.updateSettings(req.body || {});
+        res.json({ success: true, settings });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/import/csv-preview', (req, res) => {
+      try {
+        const csvText = req.body?.csvText;
+        if (!csvText || typeof csvText !== 'string') {
+          return sendError(res, 400, 'csvText is required');
+        }
+        const parsed = parseDelimitedRows(csvText, ',');
+        const validation = parsed.rows.map((row) => {
+          try {
+            postQueueService.normalizeRow(row);
+            return { rowNumber: row.__rowNumber, valid: true, error: '' };
+          } catch (err) {
+            return { rowNumber: row.__rowNumber, valid: false, error: err.message };
+          }
+        });
+        res.json({
+          success: true,
+          headers: parsed.headers,
+          rows: parsed.rows,
+          validation
+        });
+      } catch (error) {
+        sendError(res, 500, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/import/csv', (req, res) => {
+      try {
+        const csvText = req.body?.csvText;
+        if (!csvText || typeof csvText !== 'string') {
+          return sendError(res, 400, 'csvText is required');
+        }
+        const parsed = parseDelimitedRows(csvText, ',');
+        const validRows = [];
+        const errors = [];
+        parsed.rows.forEach((row) => {
+          try {
+            postQueueService.normalizeRow(row);
+            validRows.push(row);
+          } catch (err) {
+            errors.push({ rowNumber: row.__rowNumber, rowId: row.row_id || row.rowId || '', error: err.message });
+          }
+        });
+        const created = postQueueService.createJobs(validRows, 'csv_upload');
+        res.json({
+          success: true,
+          createdCount: created.length,
+          created,
+          errors
+        });
+      } catch (error) {
+        sendError(res, 500, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/import/paste', (req, res) => {
+      try {
+        const text = req.body?.text;
+        if (!text || typeof text !== 'string') {
+          return sendError(res, 400, 'text is required');
+        }
+        const parsed = parseDelimitedRows(text);
+        const validRows = [];
+        const errors = [];
+        parsed.rows.forEach((row) => {
+          try {
+            postQueueService.normalizeRow(row);
+            validRows.push(row);
+          } catch (err) {
+            errors.push({ rowNumber: row.__rowNumber, rowId: row.row_id || row.rowId || '', error: err.message });
+          }
+        });
+        const created = postQueueService.createJobs(validRows, 'bulk_paste');
+        res.json({
+          success: true,
+          delimiter: parsed.delimiter === '\t' ? 'tsv' : 'csv',
+          createdCount: created.length,
+          created,
+          errors
+        });
+      } catch (error) {
+        sendError(res, 500, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs', (req, res) => {
+      try {
+        const rows = Array.isArray(req.body?.rows) ? req.body.rows : [req.body];
+        const created = postQueueService.createJobs(rows, 'manual_entry');
+        res.json({ success: true, created });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.get('/api/posting/jobs', (req, res) => {
+      try {
+        const statusFilter = String(req.query.status || '').trim();
+        const search = String(req.query.search || '').trim().toLowerCase();
+        let jobs = postQueueService.listJobs();
+        if (statusFilter) {
+          jobs = jobs.filter(job => job.status === statusFilter);
+        }
+        if (search) {
+          jobs = jobs.filter(job =>
+            String(job.rowId || '').toLowerCase().includes(search) ||
+            String(job.messageText || '').toLowerCase().includes(search) ||
+            String(job.groupJid || '').toLowerCase().includes(search) ||
+            String(job.groupName || '').toLowerCase().includes(search) ||
+            String(job.resolvedGroup?.name || '').toLowerCase().includes(search)
+          );
+        }
+        res.json({ success: true, jobs });
+      } catch (error) {
+        sendError(res, 500, error.message);
+      }
+    });
+
+    expressApp.get('/api/posting/jobs/:id/revisions', (req, res) => {
+      try {
+        const job = postQueueService.getJobById(req.params.id);
+        if (!job) return sendError(res, 404, 'Job not found');
+        res.json({ success: true, revisions: job.revisions || [] });
+      } catch (error) {
+        sendError(res, 500, error.message);
+      }
+    });
+
+    expressApp.patch('/api/posting/jobs/:id', (req, res) => {
+      try {
+        const updated = postQueueService.updateJob(req.params.id, req.body || {}, 'manual_edit');
+        res.json({ success: true, job: updated });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.delete('/api/posting/jobs/:id', (req, res) => {
+      try {
+        postQueueService.deleteJob(req.params.id);
+        res.json({ success: true });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs/delete', (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const deleted = postQueueService.deleteJobs(ids);
+        res.json({ success: true, deleted });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs/enqueue', (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const jobs = postQueueService.enqueueJobs(ids);
+        res.json({ success: true, jobs });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs/pause', (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const jobs = postQueueService.pauseJobs(ids);
+        res.json({ success: true, jobs });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs/resume', (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const jobs = postQueueService.enqueueJobs(ids);
+        res.json({ success: true, jobs });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs/cancel', (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const jobs = postQueueService.cancelJobs(ids);
+        res.json({ success: true, jobs });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    expressApp.post('/api/posting/jobs/randomize-times', (req, res) => {
+      try {
+        const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
+        const startAt = req.body?.startAt;
+        const endAt = req.body?.endAt;
+        const jobs = postQueueService.randomizeJobTimes(ids, startAt, endAt);
+        res.json({ success: true, jobs });
+      } catch (error) {
+        sendError(res, 400, error.message);
+      }
+    });
+
+    // Use disk storage for multipart uploads to avoid base64 (33% size inflation); temp file deleted after send
+    const sendNowTempDir = path.join(os.tmpdir(), 'groupiq-send-now');
+    if (!fs.existsSync(sendNowTempDir)) fs.mkdirSync(sendNowTempDir, { recursive: true });
+    const sendNowUpload = multer({
+      storage: multer.diskStorage({
+        destination: sendNowTempDir,
+        filename: (_, file, cb) => cb(null, `img-${Date.now()}-${Math.random().toString(36).slice(2)}${path.extname(file.originalname || '') || '.bin'}`)
+      })
+    });
+    expressApp.post('/api/posting/send-now', sendNowUpload.single('image'), async (req, res) => {
+      const tempFilePath = req.file && req.file.path;
+      try {
+        const body = req.body || {};
+        const messageText = body.messageText != null ? String(body.messageText) : '';
+        const groupName = body.groupName != null ? String(body.groupName) : '';
+        const groupJid = body.groupJid != null ? String(body.groupJid) : '';
+        const imageData = body.imageData;
+        const imageMimetype = body.imageMimetype;
+
+        if (!groupName && !groupJid) {
+          return sendError(res, 400, 'groupName or groupJid is required');
+        }
+
+        const hasText = messageText.trim().length > 0;
+        const hasImageFile = req.file && req.file.path && fs.existsSync(req.file.path);
+        const hasImageBase64 = imageData && imageMimetype;
+
+        if (!hasText && !hasImageFile && !hasImageBase64) {
+          return sendError(res, 400, 'messageText or image is required');
+        }
+
+        let image = null;
+        if (hasImageFile) {
+          image = { filePath: req.file.path };
+        } else if (hasImageBase64) {
+          image = {
+            data: String(imageData),
+            mimetype: String(imageMimetype)
+          };
+        }
+
+        const result = await whatsappManager.sendMessageToGroup({
+          groupJid: groupJid.trim(),
+          groupName: groupName.trim(),
+          messageText: messageText.trim(),
+          image
+        });
+        if (result.success) {
+          const displayText = messageText.trim() || '(Image)';
+          postQueueService.recordComposeSent({
+            messageText: displayText,
+            groupName: groupName.trim(),
+            groupJid: result.group?.id,
+            resolvedGroup: result.group,
+            messageId: result.messageId
+          });
+          res.json({ success: true, messageId: result.messageId, group: result.group });
+        } else {
+          res.status(400).json({ success: false, error: result.error });
+        }
+      } catch (error) {
+        sendError(res, 500, error.message);
+      } finally {
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try { fs.unlinkSync(tempFilePath); } catch (e) { /* ignore */ }
+        }
+      }
+    });
+
+    expressApp.get('/api/posting/events', (req, res) => {
+      res.setHeader('Content-Type', 'text/event-stream');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('Connection', 'keep-alive');
+      res.write(`event: init\ndata: ${JSON.stringify({ jobs: postQueueService.listJobs(), settings: postQueueService.getSettings() })}\n\n`);
+
+      const onUpdate = (payload) => {
+        if (!res.writableEnded) {
+          res.write(`event: update\ndata: ${JSON.stringify(payload)}\n\n`);
+        }
+      };
+      postQueueService.on('update', onUpdate);
+
+      const heartbeat = setInterval(() => {
+        if (!res.writableEnded) res.write(':heartbeat\n\n');
+      }, electronConstants.SSE_HEARTBEAT_MS);
+
+      req.on('close', () => {
+        clearInterval(heartbeat);
+        postQueueService.off('update', onUpdate);
+      });
     });
 
     expressApp.post('/api/scraper/run', async (req, res) => {
@@ -282,16 +778,53 @@ function startLocalServer() {
         const lookbackDays = parseInt(req.body?.lookbackDays || 7);
         const syncToVPS = req.body?.syncToVPS !== false; // Default true for compatibility
 
-        // Create scraper service and run
-        const scraperService = new ScraperService(whatsappManager);
-        const result = await scraperService.runScraping(token, lookbackDays, syncToVPS);
+        const result = await getSharedScraperService().runScraping(token, lookbackDays, syncToVPS);
 
         res.json(result);
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
+      }
+    });
+
+    // Scrape / refresh a single group only (e.g. FIG) without running full scraper on all groups
+    expressApp.post('/api/scraper/run-group', async (req, res) => {
+      try {
+        const status = whatsappManager.getStatus();
+        if (status.status !== 'ready') {
+          return res.status(400).json({
+            success: false,
+            message: 'WhatsApp not connected',
+            status: status.status
+          });
+        }
+
+        const groupName = req.body?.groupName;
+        if (!groupName || typeof groupName !== 'string') {
+          return res.status(400).json({
+            success: false,
+            message: 'groupName is required (e.g. "FIG")'
+          });
+        }
+
+        const lookbackDays = parseInt(req.body?.lookbackDays || 30);
+        const syncToVPS = req.body?.syncToVPS === true;
+        const token = req.headers.authorization?.replace('Bearer ', '') || null;
+        if (syncToVPS && !token) {
+          return res.status(401).json({
+            success: false,
+            message: 'Authentication required when syncToVPS is true'
+          });
+        }
+
+        const result = await getSharedScraperService().runScrapingForGroup(
+          groupName.trim(),
+          lookbackDays,
+          syncToVPS,
+          token
+        );
+        res.json(result);
+      } catch (error) {
+        sendError(res, 500, error.message);
       }
     });
 
@@ -308,9 +841,7 @@ function startLocalServer() {
         const status = trackingService.getStatus();
         res.json(status);
       } catch (error) {
-        res.status(500).json({
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -318,8 +849,7 @@ function startLocalServer() {
     expressApp.post('/api/tracking-service/start', (req, res) => {
       try {
         if (!trackingService) {
-          const scraperService = new ScraperService(whatsappManager);
-          trackingService = new EngagementTrackingService(scraperService, localDataStore);
+          trackingService = new EngagementTrackingService(getSharedScraperService(), localDataStore);
         }
 
         trackingService.start();
@@ -328,10 +858,7 @@ function startLocalServer() {
           status: trackingService.getStatus()
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -350,10 +877,7 @@ function startLocalServer() {
           status: trackingService.getStatus()
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -410,10 +934,7 @@ function startLocalServer() {
           allMessages: filteredMessages
         });
       } catch (error) {
-        res.status(500).json({
-          success: false,
-          error: error.message
-        });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -422,17 +943,9 @@ function startLocalServer() {
       try {
         const limit = parseInt(req.query.limit || 50);
         const messages = localDataStore.getRecentMessages(limit);
-
-        // Transform to match frontend expectations
-        const transformed = messages.map(msg => ({
-          ...msg,
-          id: msg.message_id, // Add id field
-          message_member_count: msg.total_members // Add message_member_count field
-        }));
-
-        res.json(transformed);
+        res.json(messages.map(transformMessageForFrontend));
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -442,60 +955,60 @@ function startLocalServer() {
         if (!message) {
           return res.status(404).json({ error: 'Message not found' });
         }
-
-        // Transform to match frontend expectations
-        const transformed = {
-          ...message,
-          id: message.message_id,
-          message_member_count: message.total_members
-        };
-
-        res.json(transformed);
+        res.json(transformMessageForFrontend(message));
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
     expressApp.post('/api/messages/:id/refresh', async (req, res) => {
       try {
-        const messageId = req.params.id;
-        const message = localDataStore.getMessageById(messageId);
+        const requestedMessageId = req.params.id;
+        const resolvedMessageId = localDataStore.resolveMessageId(requestedMessageId) || requestedMessageId;
+        const message = localDataStore.getMessageById(resolvedMessageId);
 
         if (!message) {
-          return res.status(404).json({ error: 'Message not found' });
+          // Return 200 with success=false so UI loaders can always settle gracefully.
+          return res.json({
+            success: false,
+            error: 'Message not found',
+            requestedMessageId
+          });
         }
 
         // Check if WhatsApp is connected
         const status = whatsappManager.getStatus();
         if (status.status !== 'ready') {
-          return res.status(400).json({
+          return res.json({
             success: false,
             message: 'WhatsApp not connected',
-            status: status.status
+            status: status.status,
+            requestedMessageId,
+            resolvedMessageId
           });
         }
 
-        // Create scraper service and refresh this specific message
-        const scraperService = new ScraperService(whatsappManager);
-        const result = await scraperService.refreshMessageStats(messageId, message.group_name);
+        const result = await getSharedScraperService().refreshMessageStats(resolvedMessageId, message.group_name);
 
         if (result.success) {
-          // Get the updated message
-          const updatedMessage = localDataStore.getMessageById(messageId);
+          const updatedMessage = localDataStore.getMessageById(resolvedMessageId);
           res.json({
             success: true,
             message: 'Stats refreshed successfully',
-            data: {
-              ...updatedMessage,
-              id: updatedMessage.message_id,
-              message_member_count: updatedMessage.total_members
-            }
+            data: transformMessageForFrontend(updatedMessage),
+            requestedMessageId,
+            resolvedMessageId
           });
         } else {
-          res.status(404).json(result);
+          res.json({
+            success: false,
+            requestedMessageId,
+            resolvedMessageId,
+            ...result
+          });
         }
       } catch (error) {
-        res.status(500).json({
+        res.json({
           success: false,
           error: error.message
         });
@@ -520,7 +1033,7 @@ function startLocalServer() {
           res.status(404).json({ error: 'Message not found' });
         }
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -553,7 +1066,7 @@ function startLocalServer() {
           failed: failCount
         });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -563,7 +1076,7 @@ function startLocalServer() {
         const runs = localDataStore.getRuns(20);
 
         // Count runs in last 7 days
-        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+        const sevenDaysAgo = new Date(Date.now() - 7 * electronConstants.MS_PER_DAY);
         const runsLast7Days = runs.filter(r =>
           new Date(r.timestamp) >= sevenDaysAgo
         ).length;
@@ -576,7 +1089,7 @@ function startLocalServer() {
           avg_engagement_rate: stats.averageEngagement
         });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -594,7 +1107,7 @@ function startLocalServer() {
 
         res.json(transformed);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -624,7 +1137,7 @@ function startLocalServer() {
 
         res.json(transformed);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -636,35 +1149,74 @@ function startLocalServer() {
         const messages = localDataStore.getGroupMessages(groupName, limit, offset);
         res.json(messages);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
-    expressApp.get('/api/analytics/top-groups', (req, res) => {
+    function getAnalyticsAuthHeader(req) {
+      return req.headers.authorization || (storedVpsToken ? `Bearer ${storedVpsToken}` : '');
+    }
+
+    async function proxyToVPS(req, res, options = {}) {
+      const authHeader = options.authHeader !== undefined ? options.authHeader : (req.headers.authorization || (storedVpsToken ? `Bearer ${storedVpsToken}` : ''));
+      const baseUrl = options.baseUrl || VPS_BASE_URL;
+      const qs = req.originalUrl.includes('?') ? req.originalUrl.slice(req.originalUrl.indexOf('?')) : '';
+      const url = `${baseUrl}${req.path}${qs}`;
+      try {
+        const fetch = await getFetch();
+        const response = await fetch(url, {
+          method: req.method,
+          headers: {
+            'Content-Type': 'application/json',
+            'x-client-type': 'electron',
+            'Authorization': authHeader,
+            ...req.headers
+          },
+          body: req.method !== 'GET' ? JSON.stringify(req.body) : undefined,
+          agent: httpsAgent
+        });
+        const contentType = response.headers.get('content-type');
+        if (contentType && contentType.includes('application/json')) {
+          const data = await response.json();
+          res.status(response.status).json(data);
+        } else {
+          const text = await response.text();
+          res.status(response.status).send(text);
+        }
+      } catch (error) {
+        console.error('VPS proxy error:', error);
+        sendError(res, 500, 'Failed to fetch from VPS', { details: error.message });
+      }
+    }
+
+    expressApp.get('/api/analytics/top-groups', async (req, res) => {
+      if (getAnalyticsAuthHeader(req)) {
+        return proxyToVPS(req, res, { authHeader: getAnalyticsAuthHeader(req) });
+      }
       try {
         const days = parseInt(req.query.days || 7);
         const topGroups = localDataStore.getTopGroups(days);
-
-        // Transform to match frontend expectations
         const transformed = topGroups.map(g => ({
-          group_id: g.name, // Use name as ID for now
+          group_id: g.name,
           group_name: g.name,
           current_group_size: g.totalMembers,
           message_count: g.messages,
           avg_engagement_rate: g.avgEngagement
         }));
-
         res.json(transformed);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
-    expressApp.get('/api/analytics/engagement-trends', (req, res) => {
+    expressApp.get('/api/analytics/engagement-trends', async (req, res) => {
+      if (getAnalyticsAuthHeader(req)) {
+        return proxyToVPS(req, res, { authHeader: getAnalyticsAuthHeader(req) });
+      }
       try {
         const days = parseInt(req.query.days || 7);
-        const messages = localDataStore.getRecentMessages(1000);
-        const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const messages = localDataStore.getRecentMessages(electronConstants.DEFAULT_ANALYTICS_MESSAGE_LIMIT);
+        const cutoffDate = new Date(Date.now() - days * electronConstants.MS_PER_DAY);
 
         // Group messages by date and group name
         const trendsByDateAndGroup = [];
@@ -690,7 +1242,7 @@ function startLocalServer() {
 
         res.json(trendsByDateAndGroup);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
@@ -712,26 +1264,22 @@ function startLocalServer() {
 
         res.json(transformed);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
-    expressApp.get('/api/errors', (req, res) => {
-      try {
-        // Return empty array for now - errors can be tracked later if needed
-        res.json([]);
-      } catch (error) {
-        res.status(500).json({ error: error.message });
-      }
-    });
+    expressApp.get('/api/errors', (req, res) => res.json([]));
 
-    expressApp.get('/api/analytics/weekly-comparison', (req, res) => {
+    expressApp.get('/api/analytics/weekly-comparison', async (req, res) => {
+      if (getAnalyticsAuthHeader(req)) {
+        return proxyToVPS(req, res, { authHeader: getAnalyticsAuthHeader(req) });
+      }
       try {
         const now = new Date();
-        const thisWeekStart = new Date(now - 7 * 24 * 60 * 60 * 1000);
-        const lastWeekStart = new Date(now - 14 * 24 * 60 * 60 * 1000);
+        const thisWeekStart = new Date(now.getTime() - 7 * electronConstants.MS_PER_DAY);
+        const lastWeekStart = new Date(now.getTime() - 14 * electronConstants.MS_PER_DAY);
 
-        const messages = localDataStore.getRecentMessages(1000);
+        const messages = localDataStore.getRecentMessages(electronConstants.DEFAULT_ANALYTICS_MESSAGE_LIMIT);
 
         const thisWeekMessages = messages.filter(m =>
           new Date(m.message_timestamp) >= thisWeekStart
@@ -760,15 +1308,18 @@ function startLocalServer() {
           active_groups_last_week: lastWeekGroups
         });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
-    expressApp.get('/api/analytics/engagement-by-day', (req, res) => {
+    expressApp.get('/api/analytics/engagement-by-day', async (req, res) => {
+      if (getAnalyticsAuthHeader(req)) {
+        return proxyToVPS(req, res, { authHeader: getAnalyticsAuthHeader(req) });
+      }
       try {
         const days = parseInt(req.query.days || 7);
-        const messages = localDataStore.getRecentMessages(1000);
-        const cutoffDate = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        const messages = localDataStore.getRecentMessages(electronConstants.DEFAULT_ANALYTICS_MESSAGE_LIMIT);
+        const cutoffDate = new Date(Date.now() - days * electronConstants.MS_PER_DAY);
 
         // Group messages by day of week
         const dayNames = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
@@ -807,18 +1358,13 @@ function startLocalServer() {
 
         res.json(result);
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
     expressApp.get('/api/config/groups', (req, res) => {
       try {
-        const fs = require('fs');
-        const configPath = path.join(__dirname, '../src/config/groups-config.json');
-        const configData = fs.readFileSync(configPath, 'utf8');
-        const config = JSON.parse(configData);
-
-        // Return in VPS API format
+        const config = readGroupsConfig();
         res.json({
           groups: config.groups || [],
           config: {
@@ -827,105 +1373,75 @@ function startLocalServer() {
           }
         });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
     expressApp.post('/api/config/groups/add', (req, res) => {
       try {
-        const fs = require('fs');
-        const configPath = path.join(__dirname, '../src/config/groups-config.json');
-        const configData = fs.readFileSync(configPath, 'utf8');
-        const config = JSON.parse(configData);
-
+        const config = readGroupsConfig();
         const { name, enabled, notes } = req.body;
-
-        // Check if group already exists
         const existingGroup = config.groups.find(g => g.name === name);
         if (existingGroup) {
-          return res.status(400).json({ error: 'Group already exists' });
+          return sendError(res, 400, 'Group already exists');
         }
-
-        // Add new group
         config.groups.push({ name, enabled, notes: notes || '' });
-
-        // Save config
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-
+        writeGroupsConfig(config);
         res.json({ success: true, message: 'Group added successfully' });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
     expressApp.patch('/api/config/groups/:name', (req, res) => {
       try {
-        const fs = require('fs');
-        const configPath = path.join(__dirname, '../src/config/groups-config.json');
-        const configData = fs.readFileSync(configPath, 'utf8');
-        const config = JSON.parse(configData);
-
+        const config = readGroupsConfig();
         const groupName = decodeURIComponent(req.params.name);
         const updates = req.body;
-
-        // Find and update group
         const group = config.groups.find(g => g.name === groupName);
         if (!group) {
-          return res.status(404).json({ error: 'Group not found' });
+          return sendError(res, 404, 'Group not found');
         }
-
-        // Apply updates
         if (updates.enabled !== undefined) group.enabled = updates.enabled;
         if (updates.notes !== undefined) group.notes = updates.notes;
-
-        // Save config
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-
+        writeGroupsConfig(config);
         res.json({ success: true, message: 'Group updated successfully' });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
     expressApp.delete('/api/config/groups/:name', (req, res) => {
       try {
-        const fs = require('fs');
-        const configPath = path.join(__dirname, '../src/config/groups-config.json');
-        const configData = fs.readFileSync(configPath, 'utf8');
-        const config = JSON.parse(configData);
-
+        const config = readGroupsConfig();
         const groupName = decodeURIComponent(req.params.name);
-
-        // Filter out the group
         const initialLength = config.groups.length;
         config.groups = config.groups.filter(g => g.name !== groupName);
-
         if (config.groups.length === initialLength) {
-          return res.status(404).json({ error: 'Group not found' });
+          return sendError(res, 404, 'Group not found');
         }
-
-        // Save config
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
-
+        writeGroupsConfig(config);
         res.json({ success: true, message: 'Group removed successfully' });
       } catch (error) {
-        res.status(500).json({ error: error.message });
+        sendError(res, 500, error.message);
       }
     });
 
-    // Proxy API calls to VPS
+    // Allow frontend to set VPS token (e.g. after login from localStorage) so analytics can use it
+    expressApp.post('/api/auth/vps-token', (req, res) => {
+      const token = req.body && (req.body.token || req.body.accessToken);
+      if (token && typeof token === 'string') {
+        saveVpsToken(token.trim());
+        return res.json({ success: true, message: 'VPS token stored' });
+      }
+      res.status(400).json({ success: false, error: 'Missing token' });
+    });
+
+    // Proxy API calls to VPS (catch-all for routes not handled above)
     expressApp.all('/api/*', async (req, res) => {
-      const apiUrl = `https://group-iq.com${req.path}`;
-
+      const apiUrl = `${VPS_BASE_URL}${req.path}`;
       try {
-        const https = require('https');
-        const fetch = (await import('node-fetch')).default;
-
-        // Create HTTPS agent that ignores SSL errors (for development)
-        const agent = new https.Agent({
-          rejectUnauthorized: false
-        });
-
+        const fetch = await getFetch();
         const response = await fetch(apiUrl, {
           method: req.method,
           headers: {
@@ -935,13 +1451,11 @@ function startLocalServer() {
             ...req.headers
           },
           body: req.method !== 'GET' ? JSON.stringify(req.body) : undefined,
-          agent: agent
+          agent: httpsAgent
         });
 
-        // Check if response is JSON
         const contentType = response.headers.get('content-type');
         let data;
-
         if (contentType && contentType.includes('application/json')) {
           try {
             data = await response.json();
@@ -950,7 +1464,6 @@ function startLocalServer() {
             data = { error: 'Invalid JSON response from server' };
           }
         } else {
-          // Not JSON - probably an error page
           const text = await response.text();
           console.error('Non-JSON response from VPS:', text.substring(0, 200));
           data = {
@@ -960,29 +1473,33 @@ function startLocalServer() {
           };
         }
 
-        // Forward cookies
-        const setCookie = response.headers.get('set-cookie');
-        if (setCookie) {
-          res.setHeader('Set-Cookie', setCookie);
+        if (req.method === 'POST' && req.path === '/api/auth/login' && response.ok && data) {
+          const token = data.token || data.accessToken;
+          if (token) saveVpsToken(token);
         }
 
+        const setCookie = response.headers.get('set-cookie');
+        if (setCookie) res.setHeader('Set-Cookie', setCookie);
         res.status(response.status).json(data);
       } catch (error) {
         console.error('API proxy error:', error);
-        res.status(500).json({ error: 'Failed to connect to server', details: error.message });
+        sendError(res, 500, 'Failed to connect to server', { details: error.message });
       }
     });
 
     localServer = http.createServer(expressApp);
 
-    // Initialize and start engagement tracking service
+    // Initialize and start engagement tracking service (shared ScraperService used by routes)
     try {
-      const scraperService = new ScraperService(whatsappManager);
-      trackingService = new EngagementTrackingService(scraperService, localDataStore);
+      postQueueService = new PostQueueService(whatsappManager, console);
+      postQueueService.start();
+      sharedScraperService = new ScraperService(whatsappManager);
+      trackingService = new EngagementTrackingService(sharedScraperService, localDataStore);
       trackingService.start();
       console.log('Engagement tracking service initialized and started');
       console.log('→ Tracking messages for 30 days with progressive delays');
       console.log('→ Old messages (7-30 days) get 15s delay for accurate data capture');
+      console.log('Post queue service initialized and started');
     } catch (error) {
       console.error('Failed to start engagement tracking service:', error.message);
     }
@@ -1024,9 +1541,52 @@ function createWindow() {
   // Load the local dashboard
   mainWindow.loadURL(`http://localhost:${localPort}`);
 
+  // Mirror renderer (browser console) logs to main process output
+  mainWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    const levelMap = { 0: 'INFO', 1: 'WARN', 2: 'ERROR', 3: 'DEBUG' };
+    const tag = levelMap[level] || 'LOG';
+    const source = sourceId || 'renderer';
+    console.log(`[RENDERER:${tag}] ${source}:${line} ${message}`);
+  });
+
+  mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[RENDERER:CRASH]', details);
+  });
+
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    if (validatedURL && validatedURL.includes('localhost')) {
+      console.error('[RENDERER:LOAD_FAILED]', errorCode, errorDescription, validatedURL);
+    }
+  });
+
+  if (!rendererNetworkLoggingAttached) {
+    const ses = mainWindow.webContents.session;
+    rendererNetworkLoggingAttached = true;
+
+    ses.webRequest.onCompleted((details) => {
+      const url = details.url || '';
+      const statusCode = details.statusCode || 0;
+      const isApiRequest = url.includes('/api/') || url.includes('group-iq.com/api/');
+      if (isApiRequest && statusCode >= 400) {
+        console.warn(`[RENDERER:API:${statusCode}] ${details.method} ${url}`);
+      }
+    });
+
+    ses.webRequest.onErrorOccurred((details) => {
+      const url = details.url || '';
+      const isApiRequest = url.includes('/api/') || url.includes('group-iq.com/api/');
+      if (isApiRequest) {
+        console.error(`[RENDERER:API:NETWORK_ERROR] ${details.method} ${url} :: ${details.error}`);
+      }
+    });
+  }
+
   // Show when ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
+    if (!app.isPackaged) {
+      mainWindow.webContents.openDevTools();
+    }
   });
 
   // Handle window close
@@ -1058,7 +1618,7 @@ function createWindow() {
 function createTray() {
   const iconPath = path.join(__dirname, '../build/tray-icon.png');
 
-  if (require('fs').existsSync(iconPath)) {
+  if (fs.existsSync(iconPath)) {
     tray = new Tray(iconPath);
 
     const contextMenu = Menu.buildFromTemplate([
@@ -1187,6 +1747,10 @@ app.on('before-quit', () => {
   if (localServer) {
     localServer.close();
   }
+
+  if (postQueueService) {
+    postQueueService.stop();
+  }
 });
 
 // IPC Handlers
@@ -1210,11 +1774,31 @@ ipcMain.handle('show-notification', (event, { title, body }) => {
   }
 });
 
-// Handle uncaught exceptions
+ipcMain.handle('set-vps-token', (event, token) => {
+  if (token && typeof token === 'string') {
+    saveVpsToken(token.trim());
+    return true;
+  }
+  return false;
+});
+
+// Handle uncaught exceptions — log to file when packaged so we can inspect after crash
+function writeCrashLog(prefix, value) {
+  try {
+    const os = require('os');
+    const logDir = process.env.LOGS_DIR || path.join(os.tmpdir(), 'groupiq-logs');
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    const file = path.join(logDir, 'crash.log');
+    const line = `${new Date().toISOString()} ${prefix} ${typeof value === 'object' ? (value.stack || JSON.stringify(value)) : value}\n`;
+    fs.appendFileSync(file, line);
+  } catch (_) {}
+  console.error(prefix, value);
+}
+
 process.on('uncaughtException', (error) => {
-  console.error('Uncaught exception:', error);
+  writeCrashLog('Uncaught exception:', error);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
-  console.error('Unhandled rejection:', reason);
+  writeCrashLog('Unhandled rejection:', reason);
 });

@@ -2,7 +2,23 @@ const logger = require('../src/utils/logger');
 const { subDays } = require('date-fns');
 const localDataStore = require('./local-data-store');
 const fs = require('fs');
-const path = require('path');
+const { loadJsonConfig } = require('./config-loader');
+const { getDelayMsForMessageAge, getMessageAgeInHours } = require('./delay-util');
+const { SCRAPER_CONFIG_PATH, GROUPS_CONFIG_PATH } = require('./constants');
+
+const VPS_BASE_URL = process.env.VPS_BASE_URL || 'https://group-iq.com';
+const allowInsecureSSL = process.env.ALLOW_INSECURE_SSL === 'true';
+
+const defaultScraperConfig = {
+  delays: {
+    afterFetchMessages: 3000,
+    retryBaseDelay: 500,
+    betweenGroups: 2000,
+    byMessageAge: { '0-24h': 3000, '1-7d': 8000, '7-30d': 15000, '30d+': 20000 }
+  },
+  retries: { maxAttempts: 3, enablePeriodicRetry: true, periodicRetryInterval: 300000 },
+  dataQuality: { minSeenCountThreshold: 0, retryMessagesWithZeroSeen: true, retryMessagesOlderThanDays: 30 }
+};
 
 /**
  * Scraper Service for Electron
@@ -11,69 +27,57 @@ const path = require('path');
 class ScraperService {
   constructor(whatsappManager) {
     this.whatsappManager = whatsappManager;
-    this.vpsApiUrl = 'https://group-iq.com/api';
+    this.vpsApiUrl = `${VPS_BASE_URL}/api`;
     this.localDataStore = localDataStore;
-    this.config = this.loadScraperConfig();
+    this.config = loadJsonConfig(SCRAPER_CONFIG_PATH, defaultScraperConfig);
+    if (fs.existsSync(SCRAPER_CONFIG_PATH)) {
+      logger.info('Loaded scraper configuration', this.config);
+    }
+    this._nodeFetch = null;
+    this._httpsAgent = null;
   }
 
-  /**
-   * Load scraper configuration from file
-   */
-  loadScraperConfig() {
+  async withTimeout(promiseFactory, timeoutMs, stepLabel) {
+    let timeoutId = null;
     try {
-      const configPath = path.join(__dirname, 'scraper-config.json');
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf8');
-        const config = JSON.parse(configData);
-        logger.info('Loaded scraper configuration', config);
-        return config;
-      }
-    } catch (error) {
-      logger.warn('Could not load scraper config, using defaults', { error: error.message });
+      return await Promise.race([
+        Promise.resolve().then(() => promiseFactory()),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            reject(new Error(`${stepLabel} timed out after ${timeoutMs}ms`));
+          }, timeoutMs);
+        })
+      ]);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
     }
-
-    // Default configuration
-    return {
-      delays: {
-        afterFetchMessages: 3000,
-        retryBaseDelay: 500,
-        betweenGroups: 2000,
-        byMessageAge: {
-          "0-24h": 3000,
-          "1-7d": 8000,
-          "7-30d": 15000,
-          "30d+": 20000
-        }
-      },
-      retries: {
-        maxAttempts: 3,
-        enablePeriodicRetry: true,
-        periodicRetryInterval: 300000
-      },
-      dataQuality: {
-        minSeenCountThreshold: 0,
-        retryMessagesWithZeroSeen: true,
-        retryMessagesOlderThanDays: 30  // Changed from 7 to 30
-      }
-    };
   }
 
-  /**
-   * Get appropriate delay based on message age
-   */
-  getDelayForMessageAge(messageTimestamp) {
-    const ageInHours = (Date.now() - new Date(messageTimestamp).getTime()) / (1000 * 60 * 60);
-    const delays = this.config.delays.byMessageAge || {};
+  async _getFetch() {
+    if (!this._nodeFetch) this._nodeFetch = (await import('node-fetch')).default;
+    return this._nodeFetch;
+  }
 
-    if (ageInHours < 24) {
-      return delays["0-24h"] || 3000;
-    } else if (ageInHours < 168) {  // 7 days
-      return delays["1-7d"] || 8000;
-    } else if (ageInHours < 720) {  // 30 days
-      return delays["7-30d"] || 15000;
-    } else {
-      return delays["30d+"] || 20000;
+  _getHttpsAgent() {
+    if (!this._httpsAgent) {
+      const https = require('https');
+      this._httpsAgent = new https.Agent({ rejectUnauthorized: !allowInsecureSSL });
     }
+    return this._httpsAgent;
+  }
+
+  async _fetchVPS(url, options = {}) {
+    const fetch = await this._getFetch();
+    return fetch(url, {
+      ...options,
+      agent: this._getHttpsAgent(),
+      headers: { 'Content-Type': 'application/json', ...options.headers }
+    });
+  }
+
+  getDelayForMessageAge(messageTimestamp) {
+    const ageInHours = getMessageAgeInHours(messageTimestamp);
+    return getDelayMsForMessageAge(ageInHours, this.config.delays?.byMessageAge || {});
   }
 
   /**
@@ -81,17 +85,9 @@ class ScraperService {
    */
   async getMonitoredGroupsLocal() {
     try {
-      const fs = require('fs');
-      const path = require('path');
-      const configPath = path.join(__dirname, '../src/config/groups-config.json');
-
-      const configData = fs.readFileSync(configPath, 'utf8');
-      const config = JSON.parse(configData);
-
+      const config = loadJsonConfig(GROUPS_CONFIG_PATH, { groups: [] });
       const groupsList = config.groups || [];
       logger.info('Loaded groups from local config', { count: groupsList.length });
-
-      // Filter to only enabled groups
       return groupsList.filter(group => group.enabled);
     } catch (error) {
       logger.error('Error loading local groups config', { error: error.message });
@@ -109,19 +105,8 @@ class ScraperService {
     }
 
     try {
-      const https = require('https');
-      const fetch = (await import('node-fetch')).default;
-
-      const agent = new https.Agent({
-        rejectUnauthorized: false
-      });
-
-      const response = await fetch(`${this.vpsApiUrl}/config/groups`, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        agent: agent
+      const response = await this._fetchVPS(`${this.vpsApiUrl}/config/groups`, {
+        headers: { 'Authorization': `Bearer ${token}` }
       });
 
       const data = await response.json();
@@ -496,23 +481,11 @@ class ScraperService {
    */
   async syncMessagesToVPS(messages, token) {
     try {
-      const https = require('https');
-      const fetch = (await import('node-fetch')).default;
-
-      const agent = new https.Agent({
-        rejectUnauthorized: false
-      });
-
       logger.info('Syncing messages to VPS', { count: messages.length });
-
-      const response = await fetch(`${this.vpsApiUrl}/messages/bulk`, {
+      const response = await this._fetchVPS(`${this.vpsApiUrl}/messages/bulk`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ messages }),
-        agent: agent
+        headers: { 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ messages })
       });
 
       const result = await response.json();
@@ -636,6 +609,56 @@ class ScraperService {
       logger.error('Scraping job failed', { error: error.message });
       throw error;
     }
+  }
+
+  /**
+   * Scrape a single group only (e.g. refresh FIG without running full scraper).
+   * Use this to refresh one group without straining the rest.
+   * @param {string} groupName - Exact group name (e.g. "FIG")
+   * @param {number} lookbackDays - Days to look back (default 30)
+   * @param {boolean} syncToVPS - Whether to sync new messages to VPS
+   * @param {string} [token] - VPS auth token (required if syncToVPS is true)
+   */
+  async runScrapingForGroup(groupName, lookbackDays = 30, syncToVPS = false, token = null) {
+    const status = this.whatsappManager.getStatus();
+    if (status.status !== 'ready') {
+      throw new Error('WhatsApp not connected');
+    }
+    const userPhoneNumber = status.phoneNumber;
+    if (!userPhoneNumber) {
+      throw new Error('Could not determine user phone number');
+    }
+
+    const chat = await this.findChatByName(groupName);
+    if (!chat) {
+      return {
+        success: false,
+        message: `Group "${groupName}" not found in WhatsApp. Check the name matches exactly.`
+      };
+    }
+
+    const sinceDate = subDays(new Date(), lookbackDays);
+    const messages = await this.scrapeGroupMessages(chat, sinceDate, userPhoneNumber);
+
+    if (messages.length > 0) {
+      this.localDataStore.addMessages(messages);
+      if (syncToVPS && token) {
+        try {
+          await this.syncMessagesToVPS(messages, token);
+        } catch (syncError) {
+          logger.warn('VPS sync failed for single group', { group: groupName, error: syncError.message });
+        }
+      }
+    }
+
+    this.localDataStore.addRun({ groups: 1, messages: messages.length });
+    logger.info('Single-group scrape completed', { group: groupName, messages: messages.length });
+
+    return {
+      success: true,
+      message: `Refreshed "${groupName}". ${messages.length} message(s) saved locally.`,
+      stats: { groups: 1, messages: messages.length }
+    };
   }
 
   /**
@@ -763,7 +786,11 @@ class ScraperService {
       }
 
       // Find the WhatsApp chat
-      const chat = await this.findChatByName(groupName);
+      const chat = await this.withTimeout(
+        () => this.findChatByName(groupName),
+        15000,
+        'findChatByName'
+      );
       if (!chat) {
         return {
           success: false,
@@ -772,7 +799,11 @@ class ScraperService {
       }
 
       // Fetch recent messages from the chat
-      const messages = await chat.fetchMessages({ limit: 1000 });
+      const messages = await this.withTimeout(
+        () => chat.fetchMessages({ limit: 1000 }),
+        25000,
+        'fetchMessages'
+      );
 
       // Find the specific message by ID
       const targetMessage = messages.find(m => m.id.id === messageId);
@@ -808,7 +839,11 @@ class ScraperService {
       while (!messageInfo && attempts < maxAttempts) {
         attempts++;
         try {
-          messageInfo = await targetMessage.getInfo?.();
+          messageInfo = await this.withTimeout(
+            () => targetMessage.getInfo?.(),
+            8000,
+            'getInfo'
+          );
           if (!messageInfo && attempts < maxAttempts) {
             const delay = this.config.delays.retryBaseDelay * Math.pow(2, attempts - 1);
             logger.debug('Retrying getInfo() during refresh', {
@@ -842,7 +877,11 @@ class ScraperService {
 
       try {
         if (typeof targetMessage.getReactions === 'function') {
-          const reactions = await targetMessage.getReactions();
+          const reactions = await this.withTimeout(
+            () => targetMessage.getReactions(),
+            8000,
+            'getReactions'
+          );
           if (reactions && reactions.length > 0) {
             reactionsData = reactions;
           }

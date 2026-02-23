@@ -14,9 +14,12 @@
     "setup-db": "node scripts/setup-database.js",
     "build": "electron-builder",
     "build:mac": "electron-builder --mac",
-    "build:win": "USE_HARD_LINKS=false electron-builder --win --x64",
+    "build:win": "electron-builder --win --x64",
+    "build:win:unpacked": "electron-builder --win --x64 --dir",
+    "build:win:installer": "electron-builder --win --x64",
     "build:all": "electron-builder --mac --win",
     "pack": "electron-builder --dir",
+    "test:unpacked": "node scripts/test-unpacked-win.js",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -34,6 +37,7 @@
     "date-fns": "^3.0.6",
     "dotenv": "^16.4.5",
     "express": "^4.18.2",
+    "multer": "^1.4.5-lts.1",
     "node-cron": "^3.0.3",
     "node-fetch": "^3.3.2",
     "open": "^9.1.0",
@@ -70,7 +74,10 @@
     ],
     "mac": {
       "category": "public.app-category.productivity",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "build/icon.icns"
     },
     "dmg": {
@@ -79,10 +86,21 @@
     },
     "win": {
       "target": [
-        { "target": "nsis", "arch": ["x64"] },
-        { "target": "portable", "arch": ["x64"] }
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
       ],
-      "icon": "build/icon.ico"
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
     },
     "nsis": {
       "oneClick": false,
@@ -92,7 +110,10 @@
       "createStartMenuShortcut": true
     },
     "linux": {
-      "target": ["AppImage", "deb"],
+      "target": [
+        "AppImage",
+        "deb"
+      ],
       "category": "Utility",
       "icon": "build/icon.png"
     }

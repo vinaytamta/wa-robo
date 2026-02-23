@@ -40,10 +40,95 @@
   }
 }
 </script>
-  <script type="module" crossorigin src="/assets/index-Bc3jdFOX.js"></script>
-  <link rel="stylesheet" crossorigin href="/assets/index-GvNjHsNb.css">
+  <script type="module" crossorigin src="/assets/index-DoTyuXrv.js"></script>
+  <link rel="stylesheet" crossorigin href="/assets/index-CB0e1Rz7.css">
 </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div id="loading-fallback" style="display:flex;align-items:center;justify-content:center;min-height:100vh;flex-direction:column;gap:1rem;color:#64748b;font-family:Inter,sans-serif">
+        <div style="width:32px;height:32px;border:3px solid #e2e8f0;border-top-color:#002060;border-radius:50%;animation:spin 0.8s linear infinite"></div>
+        <span>Loading GroupIQ...</span>
+      </div>
+    </div>
+    <div id="error-fallback" style="display:none;padding:2rem;max-width:480px;margin:2rem auto;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;color:#991b1b;font-family:Inter,sans-serif">
+      <strong>App failed to load.</strong>
+      <p style="margin:0.5rem 0 0">Check the console (Ctrl+Shift+I) for errors. If React or esm.sh failed to load, ensure you have internet access.</p>
+    </div>
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+    <script>
+      (function unlockLoginFormIfStuck() {
+        function isVisible(el) {
+          return !!(el && el.getClientRects && el.getClientRects().length);
+        }
+
+        function findBlockingOverlays(loginContainer) {
+          const overlays = [];
+          const nodes = document.body.querySelectorAll('*');
+          const vpW = window.innerWidth;
+          const vpH = window.innerHeight;
+
+          nodes.forEach((el) => {
+            if (!el || el === loginContainer || loginContainer.contains(el)) return;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return;
+            if (style.pointerEvents === 'none') return;
+            if (style.position !== 'fixed') return;
+
+            const z = Number(style.zIndex);
+            if (Number.isFinite(z) && z < 10) return;
+
+            const rect = el.getBoundingClientRect();
+            const coversScreen = rect.width >= vpW * 0.9 && rect.height >= vpH * 0.9;
+            if (coversScreen) overlays.push(el);
+          });
+
+          return overlays;
+        }
+
+        function applyUnlock() {
+          const emailInput = document.querySelector('input[type="email"]');
+          const passwordInput = document.querySelector('input[type="password"]');
+          if (!isVisible(emailInput) || !isVisible(passwordInput)) return;
+
+          [emailInput, passwordInput].forEach((input) => {
+            input.disabled = false;
+            input.readOnly = false;
+            input.style.pointerEvents = 'auto';
+          });
+
+          const form = emailInput.closest('form') || passwordInput.closest('form');
+          const container = form || emailInput.parentElement;
+          if (!container) return;
+
+          container.style.position = 'relative';
+          container.style.zIndex = '2147483647';
+          container.style.pointerEvents = 'auto';
+
+          // If logout left a full-screen overlay mounted, disable its hit-testing.
+          findBlockingOverlays(container).forEach((overlay) => {
+            overlay.style.pointerEvents = 'none';
+          });
+        }
+
+        setInterval(applyUnlock, 500);
+        window.addEventListener('focus', applyUnlock);
+        document.addEventListener('visibilitychange', applyUnlock);
+      })();
+      (function checkLoad() {
+        var t;
+        function cancel() { if (t) clearTimeout(t); t = null; }
+        t = setTimeout(function() {
+          t = null;
+          var root = document.getElementById('root');
+          var err = document.getElementById('error-fallback');
+          if (root && root.children.length === 1 && root.querySelector('#loading-fallback') && err) {
+            err.style.display = 'block';
+            root.style.display = 'none';
+          }
+        }, 10000);
+        document.querySelector('script[src*="index-"]')?.addEventListener('load', cancel);
+        window.addEventListener('error', cancel);
+      })();
+    </script>
 </body>
 </html>

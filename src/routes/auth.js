@@ -1,6 +1,8 @@
 const express = require('express');
 const User = require('../models/user');
-const { authenticate } = require('../middleware/auth');
+const { authenticate, getSessionToken } = require('../middleware/auth');
+const { SESSION_MAX_AGE_MS } = require('../constants');
+const logger = require('../utils/logger');
 
 const router = express.Router();
 
@@ -36,7 +38,7 @@ router.post('/register', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Registration error:', error);
+    logger.error('Registration error', { error: error.message });
     res.status(500).json({ error: 'Registration failed' });
   }
 });
@@ -74,11 +76,10 @@ router.post('/login', async (req, res) => {
     // Create session
     const token = await User.createSession(user.id);
 
-    // Set cookie
     res.cookie('session_token', token, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
-      maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
+      maxAge: SESSION_MAX_AGE_MS,
       sameSite: 'lax'
     });
 
@@ -94,7 +95,7 @@ router.post('/login', async (req, res) => {
       token
     });
   } catch (error) {
-    console.error('Login error:', error);
+    logger.error('Login error', { error: error.message });
     res.status(500).json({ error: 'Login failed' });
   }
 });
@@ -105,17 +106,12 @@ router.post('/login', async (req, res) => {
  */
 router.post('/logout', authenticate, async (req, res) => {
   try {
-    const token = req.cookies?.session_token ||
-                  req.headers.authorization?.replace('Bearer ', '');
-
-    if (token) {
-      await User.deleteSession(token);
-    }
-
+    const token = getSessionToken(req);
+    if (token) await User.deleteSession(token);
     res.clearCookie('session_token');
     res.json({ message: 'Logout successful' });
   } catch (error) {
-    console.error('Logout error:', error);
+    logger.error('Logout error', { error: error.message });
     res.status(500).json({ error: 'Logout failed' });
   }
 });
@@ -137,7 +133,7 @@ router.get('/me', authenticate, async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Get user error:', error);
+    logger.error('Get user error', { error: error.message });
     res.status(500).json({ error: 'Failed to get user info' });
   }
 });

@@ -1,11 +1,26 @@
 const logger = require('../src/utils/logger');
-const fs = require('fs');
-const path = require('path');
+const { loadJsonConfig } = require('./config-loader');
+const { getDelayMsForMessageAge, getMessageAgeInHours } = require('./delay-util');
+const { ENGAGEMENT_TRACKING_CONFIG_PATH, MS_PER_DAY } = require('./constants');
+
+const INITIAL_DELAY_MS = 120000; // 2 minutes before first check
+const MIN_DELAY_BETWEEN_MESSAGES_MS = 2000;
+
+const defaultEngagementConfig = {
+  tracking: {
+    enabled: true,
+    maxTrackingDays: 30,
+    intervals: { '0-24h': 300000, '1-3d': 900000, '3-7d': 3600000, '7-30d': 21600000 }
+  },
+  delays: {
+    byMessageAge: { '0-24h': 3000, '1-7d': 8000, '7-30d': 15000, '30d+': 20000 }
+  },
+  snapshotting: { enabled: true, storeHistoricalSnapshots: true, maxSnapshotsPerMessage: 100 }
+};
 
 /**
  * Engagement Tracking Service
  * Automatically tracks message engagement evolution over 30 days
- * Uses progressive delays for old messages (15s for 7-30 day old messages)
  */
 class EngagementTrackingService {
   constructor(scraperService, localDataStore) {
@@ -13,47 +28,8 @@ class EngagementTrackingService {
     this.localDataStore = localDataStore;
     this.trackingInterval = null;
     this.isRunning = false;
-    this.config = this.loadConfig();
+    this.config = loadJsonConfig(ENGAGEMENT_TRACKING_CONFIG_PATH, defaultEngagementConfig);
     this.lastCheckTime = null;
-  }
-
-  loadConfig() {
-    try {
-      const configPath = path.join(__dirname, 'engagement-tracking-config.json');
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf8');
-        return JSON.parse(configData);
-      }
-    } catch (error) {
-      logger.warn('Could not load engagement tracking config, using defaults', { error: error.message });
-    }
-
-    // Default configuration
-    return {
-      tracking: {
-        enabled: true,
-        maxTrackingDays: 30,
-        intervals: {
-          "0-24h": 300000,    // 5 minutes
-          "1-3d": 900000,     // 15 minutes
-          "3-7d": 3600000,    // 1 hour
-          "7-30d": 21600000   // 6 hours
-        }
-      },
-      delays: {
-        byMessageAge: {
-          "0-24h": 3000,
-          "1-7d": 8000,
-          "7-30d": 15000,
-          "30d+": 20000
-        }
-      },
-      snapshotting: {
-        enabled: true,
-        storeHistoricalSnapshots: true,
-        maxSnapshotsPerMessage: 100
-      }
-    };
   }
 
   /**
@@ -81,10 +57,9 @@ class EngagementTrackingService {
       intervals: this.config.tracking.intervals
     });
 
-    // Run first check after 2 minutes (give app time to settle)
     setTimeout(() => {
       this.runTrackingCycle();
-    }, 120000);
+    }, INITIAL_DELAY_MS);
 
     // Then run periodically at shortest interval
     this.trackingInterval = setInterval(() => {
@@ -137,11 +112,10 @@ class EngagementTrackingService {
 
       for (const message of messagesToTrack) {
         try {
-          const messageAge = this.getMessageAgeInHours(message);
-          const delayBetweenMessages = this.getDelayForMessageAge(messageAge);
+          const messageAge = getMessageAgeInHours(message.message_timestamp);
+          const delayBetweenMessages = getDelayMsForMessageAge(messageAge, this.config.delays?.byMessageAge || {});
 
-          // Wait between messages to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 2000));
+          await new Promise(resolve => setTimeout(resolve, MIN_DELAY_BETWEEN_MESSAGES_MS));
 
           logger.info('Tracking message engagement', {
             messageId: message.message_id,
@@ -201,7 +175,7 @@ class EngagementTrackingService {
    */
   findMessagesNeedingTracking(messages) {
     const now = new Date();
-    const maxTrackingAge = this.config.tracking.maxTrackingDays * 24 * 60 * 60 * 1000;
+    const maxTrackingAge = this.config.tracking.maxTrackingDays * MS_PER_DAY;
 
     return messages.filter(msg => {
       // Skip messages that are not marked for tracking
@@ -298,33 +272,10 @@ class EngagementTrackingService {
     }
   }
 
-  /**
-   * Get message age in hours
-   */
   getMessageAgeInHours(message) {
-    const now = new Date();
-    const messageDate = new Date(message.message_timestamp);
-    return (now - messageDate) / (1000 * 60 * 60);
+    return getMessageAgeInHours(message.message_timestamp);
   }
 
-  /**
-   * Get appropriate delay for message based on age
-   */
-  getDelayForMessageAge(ageInHours) {
-    if (ageInHours < 24) {
-      return this.config.delays.byMessageAge["0-24h"];
-    } else if (ageInHours < 168) {
-      return this.config.delays.byMessageAge["1-7d"];
-    } else if (ageInHours < 720) {
-      return this.config.delays.byMessageAge["7-30d"];
-    } else {
-      return this.config.delays.byMessageAge["30d+"];
-    }
-  }
-
-  /**
-   * Categorize messages by age for logging
-   */
   categorizeMessages(messages) {
     const categories = {
       "0-24h": 0,

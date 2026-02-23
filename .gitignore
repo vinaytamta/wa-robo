@@ -43,6 +43,10 @@ build/*.png
 # Session data
 .wwebjs_sessions/
 
+# Baileys PoC
+baileys_auth_poc/
+baileys-qr.html
+
 # Claude files
 .claude/
 

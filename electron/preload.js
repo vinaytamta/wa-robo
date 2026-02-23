@@ -6,6 +6,9 @@ contextBridge.exposeInMainWorld('electron', {
   // Mark this as Electron environment
   isElectron: true,
 
+  // Store VPS token so analytics can pull from VPS (call after login with token from localStorage)
+  setVpsToken: (token) => ipcRenderer.invoke('set-vps-token', token),
+
   // WhatsApp controls
   startWhatsApp: (userData) => ipcRenderer.invoke('start-whatsapp', userData),
   stopWhatsApp: () => ipcRenderer.invoke('stop-whatsapp'),

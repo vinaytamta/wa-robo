@@ -50,17 +50,18 @@ const transports = [
     )
   })
 ];
+const MAX_LOG_FILE_SIZE = 10 * 1024 * 1024; // 10MB
 if (logsDirReady) {
   transports.push(
     new winston.transports.File({
       filename: path.join(logsDir, 'combined.log'),
-      maxsize: 10485760,
+      maxsize: MAX_LOG_FILE_SIZE,
       maxFiles: 5
     }),
     new winston.transports.File({
       filename: path.join(logsDir, 'error.log'),
       level: 'error',
-      maxsize: 10485760,
+      maxsize: MAX_LOG_FILE_SIZE,
       maxFiles: 5
     })
   );

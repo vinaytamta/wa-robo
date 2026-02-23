@@ -8,7 +8,8 @@ const logger = require('../src/utils/logger');
  */
 class DataPersistence {
   constructor() {
-    this.dataDir = path.join(__dirname, '../data');
+    // Use userData when packaged (app.asar is read-only); otherwise project-relative data/
+    this.dataDir = process.env.DATA_DIR || path.join(__dirname, '../data');
     this.messagesFile = path.join(this.dataDir, 'messages.json');
     this.groupsFile = path.join(this.dataDir, 'groups.json');
     this.runsFile = path.join(this.dataDir, 'runs.json');
@@ -28,12 +29,30 @@ class DataPersistence {
   }
 
   /**
+   * Load JSON file or return default (shared pattern for loadMessages/loadGroups/loadRuns)
+   * @param {string} filePath
+   * @param {*} defaultReturn
+   * @returns {*}
+   */
+  _loadJsonFile(filePath, defaultReturn) {
+    try {
+      if (fs.existsSync(filePath)) {
+        const data = fs.readFileSync(filePath, 'utf8');
+        return JSON.parse(data);
+      }
+    } catch (error) {
+      logger.error('Failed to load file', { path: filePath, error: error.message });
+    }
+    return defaultReturn;
+  }
+
+  /**
    * Save messages to file
    */
   saveMessages(messages) {
     try {
       fs.writeFileSync(this.messagesFile, JSON.stringify(messages, null, 2));
-      logger.info('Messages saved to file', { count: messages.length });
+      logger.debug('Messages saved to file', { count: messages.length });
     } catch (error) {
       logger.error('Failed to save messages to file', { error: error.message });
     }
@@ -43,17 +62,11 @@ class DataPersistence {
    * Load messages from file
    */
   loadMessages() {
-    try {
-      if (fs.existsSync(this.messagesFile)) {
-        const data = fs.readFileSync(this.messagesFile, 'utf8');
-        const messages = JSON.parse(data);
-        logger.info('Messages loaded from file', { count: messages.length });
-        return messages;
-      }
-    } catch (error) {
-      logger.error('Failed to load messages from file', { error: error.message });
+    const messages = this._loadJsonFile(this.messagesFile, []);
+    if (Array.isArray(messages) && messages.length > 0) {
+      logger.info('Messages loaded from file', { count: messages.length });
     }
-    return [];
+    return Array.isArray(messages) ? messages : [];
   }
 
   /**
@@ -63,7 +76,7 @@ class DataPersistence {
     try {
       const groupsArray = Array.from(groups.values());
       fs.writeFileSync(this.groupsFile, JSON.stringify(groupsArray, null, 2));
-      logger.info('Groups saved to file', { count: groupsArray.length });
+      logger.debug('Groups saved to file', { count: groupsArray.length });
     } catch (error) {
       logger.error('Failed to save groups to file', { error: error.message });
     }
@@ -73,21 +86,13 @@ class DataPersistence {
    * Load groups from file
    */
   loadGroups() {
-    try {
-      if (fs.existsSync(this.groupsFile)) {
-        const data = fs.readFileSync(this.groupsFile, 'utf8');
-        const groupsArray = JSON.parse(data);
-        const groups = new Map();
-        groupsArray.forEach(group => {
-          groups.set(group.name, group);
-        });
-        logger.info('Groups loaded from file', { count: groups.size });
-        return groups;
-      }
-    } catch (error) {
-      logger.error('Failed to load groups from file', { error: error.message });
+    const groupsArray = this._loadJsonFile(this.groupsFile, []);
+    const groups = new Map();
+    if (Array.isArray(groupsArray)) {
+      groupsArray.forEach(group => groups.set(group.name, group));
+      logger.info('Groups loaded from file', { count: groups.size });
     }
-    return new Map();
+    return groups;
   }
 
   /**
@@ -96,7 +101,7 @@ class DataPersistence {
   saveRuns(runs) {
     try {
       fs.writeFileSync(this.runsFile, JSON.stringify(runs, null, 2));
-      logger.info('Runs saved to file', { count: runs.length });
+      logger.debug('Runs saved to file', { count: runs.length });
     } catch (error) {
       logger.error('Failed to save runs to file', { error: error.message });
     }
@@ -106,17 +111,11 @@ class DataPersistence {
    * Load runs from file
    */
   loadRuns() {
-    try {
-      if (fs.existsSync(this.runsFile)) {
-        const data = fs.readFileSync(this.runsFile, 'utf8');
-        const runs = JSON.parse(data);
-        logger.info('Runs loaded from file', { count: runs.length });
-        return runs;
-      }
-    } catch (error) {
-      logger.error('Failed to load runs from file', { error: error.message });
+    const runs = this._loadJsonFile(this.runsFile, []);
+    if (Array.isArray(runs) && runs.length > 0) {
+      logger.info('Runs loaded from file', { count: runs.length });
     }
-    return [];
+    return Array.isArray(runs) ? runs : [];
   }
 
   /**

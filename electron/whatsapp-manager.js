@@ -1,6 +1,17 @@
+const path = require('path');
+const fs = require('fs');
+const os = require('os');
+const { spawn } = require('child_process');
+const { MessageMedia } = require('whatsapp-web.js');
 const whatsappClient = require('../src/config/whatsapp');
 const logger = require('../src/utils/logger');
 const EventEmitter = require('events');
+
+function getSessionPathFragment() {
+  const sessionName = process.env.WA_SESSION_NAME || 'wa-robo-session';
+  const basePath = process.env.WWEBJS_AUTH_PATH || path.join(process.cwd(), '.wwebjs_auth');
+  return path.join(basePath, `session-${sessionName}`);
+}
 
 /**
  * WhatsApp Manager for Electron
@@ -14,12 +25,175 @@ class WhatsAppManager extends EventEmitter {
     this.qrCode = null;
     this.phoneNumber = null;
     this.isInitializing = false;
+    this.hasTriedAutoBrowserInstall = false;
+  }
+
+  isMissingChromeError(errorMessage) {
+    const msg = String(errorMessage || '').toLowerCase();
+    return msg.includes('could not find chrome');
+  }
+
+  getPuppeteerCacheDir() {
+    return process.env.PUPPETEER_CACHE_DIR || path.join(os.homedir(), '.cache', 'puppeteer');
+  }
+
+  getCandidateChromeExecutablePaths(versionDirName) {
+    const chromeRoot = path.join(this.getPuppeteerCacheDir(), 'chrome', versionDirName);
+    if (process.platform === 'win32') {
+      return [path.join(chromeRoot, 'chrome-win64', 'chrome.exe')];
+    }
+    if (process.platform === 'darwin') {
+      return [
+        path.join(chromeRoot, 'chrome-mac', 'Google Chrome for Testing.app', 'Contents', 'MacOS', 'Google Chrome for Testing'),
+        path.join(chromeRoot, 'chrome-mac', 'Google Chrome for Testing')
+      ];
+    }
+    return [path.join(chromeRoot, 'chrome-linux64', 'chrome')];
+  }
+
+  findInstalledPuppeteerChrome() {
+    try {
+      const chromeBase = path.join(this.getPuppeteerCacheDir(), 'chrome');
+      if (!fs.existsSync(chromeBase)) return null;
+
+      const entries = fs.readdirSync(chromeBase, { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) => ({
+          name: entry.name,
+          mtimeMs: fs.statSync(path.join(chromeBase, entry.name)).mtimeMs
+        }))
+        .sort((a, b) => b.mtimeMs - a.mtimeMs);
+
+      for (const entry of entries) {
+        const candidates = this.getCandidateChromeExecutablePaths(entry.name);
+        for (const candidate of candidates) {
+          if (fs.existsSync(candidate)) {
+            return candidate;
+          }
+        }
+      }
+    } catch (error) {
+      logger.warn('Failed to scan Puppeteer Chrome cache', { error: error.message });
+    }
+    return null;
+  }
+
+  async installPuppeteerChrome() {
+    const cliPath = require.resolve('puppeteer/lib/cjs/puppeteer/node/cli.js');
+    logger.info('Installing Puppeteer Chrome (first-run setup)...');
+
+    await new Promise((resolve, reject) => {
+      const child = spawn(
+        process.execPath,
+        [cliPath, 'browsers', 'install', 'chrome'],
+        {
+          env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+          stdio: ['ignore', 'pipe', 'pipe']
+        }
+      );
+
+      let stderr = '';
+      child.stdout.on('data', (chunk) => {
+        const text = String(chunk || '').trim();
+        if (text) logger.info('Puppeteer install output', { line: text });
+      });
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk || '');
+      });
+
+      const timeout = setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch (_) {}
+        reject(new Error('Timed out installing Puppeteer Chrome'));
+      }, 10 * 60 * 1000);
+
+      child.on('error', (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeout);
+        if (code === 0) return resolve();
+        reject(new Error(`Puppeteer Chrome install failed (exit ${code}): ${stderr.trim()}`));
+      });
+    });
+  }
+
+  async ensureChromeExecutable() {
+    if (process.env.WA_CHROME_PATH && fs.existsSync(process.env.WA_CHROME_PATH)) {
+      return process.env.WA_CHROME_PATH;
+    }
+
+    const cached = this.findInstalledPuppeteerChrome();
+    if (cached) {
+      process.env.WA_CHROME_PATH = cached;
+      logger.info('Using cached Puppeteer Chrome', { executablePath: cached });
+      return cached;
+    }
+
+    await this.installPuppeteerChrome();
+
+    const installed = this.findInstalledPuppeteerChrome();
+    if (!installed) {
+      throw new Error('Puppeteer Chrome install completed but executable was not found');
+    }
+
+    process.env.WA_CHROME_PATH = installed;
+    logger.info('Using newly installed Puppeteer Chrome', { executablePath: installed });
+    return installed;
+  }
+
+  async startClientInitialization() {
+    this.client = whatsappClient.createClient();
+    this.setupEventHandlers();
+
+    this.client.initialize().catch(async (err) => {
+      logger.error('WhatsApp client initialize() failed', { error: err.message, stack: err.stack });
+
+      if (this.isMissingChromeError(err.message) && !this.hasTriedAutoBrowserInstall) {
+        this.hasTriedAutoBrowserInstall = true;
+        this.status = 'installing_browser';
+        this.emit('status', { status: this.status, message: 'Installing browser for first run...' });
+
+        try {
+          await this.ensureChromeExecutable();
+
+          // Recreate client with new executable path
+          if (this.client) {
+            try {
+              await this.client.destroy();
+            } catch (_) {}
+          }
+          this.client = null;
+
+          this.status = 'initializing';
+          this.emit('status', { status: this.status, message: 'Retrying WhatsApp initialization...' });
+          await this.startClientInitialization();
+          return;
+        } catch (installError) {
+          logger.error('Auto-install browser failed', { error: installError.message });
+          this.status = 'error';
+          this.isInitializing = false;
+          this.emit('status', { status: this.status, error: installError.message });
+          return;
+        }
+      }
+
+      this.status = 'error';
+      this.isInitializing = false;
+      this.emit('status', { status: this.status, error: err.message });
+    });
   }
 
   /**
    * Clean up any existing Chrome processes using the session
+   * (Skipped on Windows — pkill/lsof not available; no-op to avoid blocking init)
    */
   async cleanupExistingProcesses() {
+    if (process.platform === 'win32') {
+      logger.debug('Skipping Chrome cleanup on Windows');
+      return;
+    }
     try {
       const { execSync } = require('child_process');
       let killedProcesses = false;
@@ -47,7 +221,7 @@ class WhatsAppManager extends EventEmitter {
 
       // Method 3: Use lsof to find processes locking the session directory
       try {
-        const sessionPath = '.wwebjs_auth/session-wa-robo-session';
+        const sessionPath = getSessionPathFragment();
         const result = execSync(`lsof | grep "${sessionPath}" | awk '{print $2}' | sort -u`, {
           encoding: 'utf8',
           timeout: 5000
@@ -126,12 +300,14 @@ class WhatsAppManager extends EventEmitter {
       // Clean up any existing Chrome processes first
       await this.cleanupExistingProcesses();
 
-      // Create and setup client
-      this.client = whatsappClient.createClient();
-      this.setupEventHandlers();
+      // If Chrome is already present in Puppeteer cache, prefer it proactively.
+      const cachedChromePath = this.findInstalledPuppeteerChrome();
+      if (cachedChromePath) {
+        process.env.WA_CHROME_PATH = cachedChromePath;
+      }
 
-      // Initialize (don't wait for ready - let events handle it)
-      this.client.initialize();
+      // Create and setup client
+      await this.startClientInitialization();
 
       logger.info('WhatsApp client initialization started');
       return { success: true, message: 'WhatsApp client initializing...' };
@@ -324,6 +500,105 @@ class WhatsAppManager extends EventEmitter {
     } catch (error) {
       logger.error('Error fetching chats', { error: error.message });
       throw error;
+    }
+  }
+
+  /**
+   * Resolve a target group by jid first, then by exact name match.
+   */
+  async resolveGroupTarget({ groupJid, groupName }) {
+    if (!this.client || this.status !== 'ready') {
+      throw new Error('WhatsApp client not ready');
+    }
+
+    const chats = await this.client.getChats();
+    const groups = chats.filter(chat => chat.isGroup);
+
+    if (groupJid) {
+      const byId = groups.find(group => group.id?._serialized === groupJid);
+      if (byId) {
+        return {
+          id: byId.id._serialized,
+          name: byId.name,
+          chat: byId
+        };
+      }
+    }
+
+    if (groupName) {
+      const normalizedTarget = String(groupName).trim().toLowerCase();
+      const byName = groups.find(group => String(group.name || '').trim().toLowerCase() === normalizedTarget);
+      if (byName) {
+        return {
+          id: byName.id._serialized,
+          name: byName.name,
+          chat: byName
+        };
+      }
+    }
+
+    throw new Error('Target group not found');
+  }
+
+  /**
+   * Send a text and/or image message to a target group.
+   * @param {Object} opts
+   * @param {string} [opts.groupJid]
+   * @param {string} [opts.groupName]
+   * @param {string} [opts.messageText] - Optional caption when sending image
+   * @param {Object} [opts.image] - Optional image: { filePath } or { data, mimetype }
+   */
+  async sendMessageToGroup({ groupJid, groupName, messageText, image }) {
+    const hasText = messageText && String(messageText).trim();
+    const hasImage = image && (image.filePath || (image.data && image.mimetype));
+
+    if (!hasText && !hasImage) {
+      return { success: false, error: 'messageText or image is required' };
+    }
+
+    try {
+      const target = await this.resolveGroupTarget({ groupJid, groupName });
+
+      if (hasImage) {
+        let media;
+        if (image.filePath && fs.existsSync(image.filePath)) {
+          media = MessageMedia.fromFilePath(image.filePath);
+        } else if (image.data && image.mimetype) {
+          media = new MessageMedia(image.mimetype, image.data);
+        } else {
+          return { success: false, error: 'Invalid image: provide filePath or data+mimetype' };
+        }
+        const caption = hasText ? String(messageText).trim() : undefined;
+        const sendResult = await this.client.sendMessage(target.id, media, { caption });
+        return {
+          success: true,
+          messageId: sendResult?.id?._serialized || '',
+          group: {
+            id: target.id,
+            name: target.name
+          }
+        };
+      }
+
+      const sendResult = await this.client.sendMessage(target.id, String(messageText));
+      return {
+        success: true,
+        messageId: sendResult?.id?._serialized || '',
+        group: {
+          id: target.id,
+          name: target.name
+        }
+      };
+    } catch (error) {
+      logger.error('Failed to send message to group', {
+        error: error.message,
+        groupJid,
+        groupName
+      });
+      return {
+        success: false,
+        error: error.message
+      };
     }
   }
 

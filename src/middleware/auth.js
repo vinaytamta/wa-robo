@@ -1,4 +1,13 @@
 const User = require('../models/user');
+const logger = require('../utils/logger');
+
+/**
+ * Get session token from request (cookie or Authorization header)
+ */
+function getSessionToken(req) {
+  return req.cookies?.session_token ||
+    req.headers.authorization?.replace('Bearer ', '');
+}
 
 /**
  * Authentication middleware
@@ -6,26 +15,18 @@ const User = require('../models/user');
  */
 async function authenticate(req, res, next) {
   try {
-    // Get token from cookie or Authorization header
-    const token = req.cookies?.session_token ||
-                  req.headers.authorization?.replace('Bearer ', '');
-
+    const token = getSessionToken(req);
     if (!token) {
       return res.status(401).json({ error: 'Authentication required' });
     }
-
-    // Find user by session token
     const user = await User.findBySessionToken(token);
-
     if (!user || !user.is_active) {
       return res.status(401).json({ error: 'Invalid or expired session' });
     }
-
-    // Attach user to request
     req.user = user;
     next();
   } catch (error) {
-    console.error('Authentication error:', error);
+    logger.error('Authentication error', { error: error.message });
     return res.status(500).json({ error: 'Authentication failed' });
   }
 }
@@ -47,9 +48,7 @@ function requireAdmin(req, res, next) {
  */
 async function optionalAuth(req, res, next) {
   try {
-    const token = req.cookies?.session_token ||
-                  req.headers.authorization?.replace('Bearer ', '');
-
+    const token = getSessionToken(req);
     if (token) {
       const user = await User.findBySessionToken(token);
       if (user && user.is_active) {
@@ -58,12 +57,13 @@ async function optionalAuth(req, res, next) {
     }
     next();
   } catch (error) {
-    console.error('Optional auth error:', error);
+    logger.error('Optional auth error', { error: error.message });
     next();
   }
 }
 
 module.exports = {
+  getSessionToken,
   authenticate,
   requireAdmin,
   optionalAuth

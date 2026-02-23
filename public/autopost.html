@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GroupIQ Auto Posting</title>
+    <link rel="stylesheet" href="/autopost.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header class="topbar">
+        <div>
+          <h1>GroupIQ Auto Posting</h1>
+          <p>Posting-focused mode. Full dashboard remains available at <a href="/full-ui">/full-ui</a>.</p>
+        </div>
+        <div class="status-wrap">
+          <span id="wa-status" class="badge">Status: unknown</span>
+          <button id="refresh-all">Refresh</button>
+        </div>
+      </header>
+
+      <section class="card row">
+        <h2>WhatsApp Connection</h2>
+        <div class="inline-actions">
+          <button id="wa-connect">Connect</button>
+          <button id="wa-disconnect">Disconnect</button>
+          <button id="wa-groups">Fetch Groups</button>
+        </div>
+        <p id="wa-info" class="muted"></p>
+      </section>
+
+      <section class="card row">
+        <h2>Global Posting Settings</h2>
+        <div class="inline-actions">
+          <label for="random-delay-max">Random Delay Max Minutes</label>
+          <input id="random-delay-max" type="number" min="0" max="180" value="0" />
+          <button id="save-settings">Save</button>
+        </div>
+      </section>
+
+      <section class="grid">
+        <section class="card">
+          <h2>Upload CSV</h2>
+          <input id="csv-file" type="file" accept=".csv,text/csv" />
+          <div class="inline-actions">
+            <button id="csv-preview">Preview</button>
+            <button id="csv-import">Import Rows</button>
+          </div>
+          <pre id="csv-preview-output" class="console"></pre>
+        </section>
+
+        <section class="card">
+          <h2>Manual Row Entry</h2>
+          <div class="form-grid">
+            <input id="manual-row-id" placeholder="row_id (optional)" />
+            <input id="manual-group-jid" placeholder="group_jid (optional)" />
+            <input id="manual-group-name" placeholder="group_name (optional)" />
+            <input id="manual-scheduled-at" placeholder="scheduled_at (YYYY-MM-DD HH:mm)" />
+            <textarea id="manual-message" placeholder="message_text"></textarea>
+          </div>
+          <button id="manual-add">Add Row</button>
+        </section>
+      </section>
+
+      <section class="card">
+        <h2>Bulk Paste (CSV or TSV)</h2>
+        <p class="muted">First line must include headers like: row_id,group_jid,group_name,scheduled_at,message_text,enabled</p>
+        <textarea id="paste-input" class="large-text" placeholder="Paste rows here..."></textarea>
+        <button id="paste-import">Import Pasted Rows</button>
+      </section>
+
+      <section class="card">
+        <h2>Message Lifecycle Table</h2>
+        <div class="toolbar">
+          <select id="status-filter">
+            <option value="">All</option>
+            <option value="uploaded">Uploaded</option>
+            <option value="queued">In Queue</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="sent">Posted</option>
+            <option value="failed">Failed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <input id="search-input" placeholder="Search row/message/group..." />
+          <button id="apply-filters">Apply</button>
+        </div>
+
+        <div class="inline-actions">
+          <button id="add-row">Add row</button>
+          <button id="delete-selected" class="secondary">Delete selected</button>
+          <button id="action-enqueue">Enqueue</button>
+          <button id="action-pause">Pause</button>
+          <button id="action-resume">Resume</button>
+          <button id="action-cancel">Cancel</button>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th><input id="select-all" type="checkbox" /></th>
+                <th>ID</th>
+                <th>row_id</th>
+                <th>message_text</th>
+                <th>group</th>
+                <th>scheduled_at</th>
+                <th>delay_ms</th>
+                <th>actual_send_at</th>
+                <th>status</th>
+                <th>reason</th>
+                <th>revisions</th>
+                <th>actions</th>
+              </tr>
+            </thead>
+            <tbody id="jobs-table-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/autopost.js"></script>
+  </body>
+</html>

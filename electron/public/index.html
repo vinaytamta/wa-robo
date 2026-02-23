@@ -45,5 +45,65 @@
 </head>
   <body>
     <div id="root"></div>
+    <script>
+      (function unlockLoginFormIfStuck() {
+        function isVisible(el) {
+          return !!(el && el.getClientRects && el.getClientRects().length);
+        }
+
+        function findBlockingOverlays(loginContainer) {
+          const overlays = [];
+          const nodes = document.body.querySelectorAll('*');
+          const vpW = window.innerWidth;
+          const vpH = window.innerHeight;
+
+          nodes.forEach((el) => {
+            if (!el || el === loginContainer || loginContainer.contains(el)) return;
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden') return;
+            if (style.pointerEvents === 'none') return;
+            if (style.position !== 'fixed') return;
+
+            const z = Number(style.zIndex);
+            if (Number.isFinite(z) && z < 10) return;
+
+            const rect = el.getBoundingClientRect();
+            const coversScreen = rect.width >= vpW * 0.9 && rect.height >= vpH * 0.9;
+            if (coversScreen) overlays.push(el);
+          });
+
+          return overlays;
+        }
+
+        function applyUnlock() {
+          const emailInput = document.querySelector('input[type="email"]');
+          const passwordInput = document.querySelector('input[type="password"]');
+          if (!isVisible(emailInput) || !isVisible(passwordInput)) return;
+
+          [emailInput, passwordInput].forEach((input) => {
+            input.disabled = false;
+            input.readOnly = false;
+            input.style.pointerEvents = 'auto';
+          });
+
+          const form = emailInput.closest('form') || passwordInput.closest('form');
+          const container = form || emailInput.parentElement;
+          if (!container) return;
+
+          container.style.position = 'relative';
+          container.style.zIndex = '2147483647';
+          container.style.pointerEvents = 'auto';
+
+          // If logout left a full-screen overlay mounted, disable its hit-testing.
+          findBlockingOverlays(container).forEach((overlay) => {
+            overlay.style.pointerEvents = 'none';
+          });
+        }
+
+        setInterval(applyUnlock, 500);
+        window.addEventListener('focus', applyUnlock);
+        document.addEventListener('visibilitychange', applyUnlock);
+      })();
+    </script>
 </body>
 </html>

@@ -55,8 +55,9 @@ class User {
    * Create session token
    */
   static async createSession(userId) {
+    const { SESSION_MAX_AGE_MS } = require('../constants');
     const token = crypto.randomBytes(32).toString('hex');
-    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
+    const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_MS);
 
     await pool.query(
       `INSERT INTO user_sessions (user_id, session_token, expires_at)

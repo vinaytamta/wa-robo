@@ -1,10 +1,14 @@
 const logger = require('../src/utils/logger');
-const fs = require('fs');
-const path = require('path');
+const { loadJsonConfig } = require('./config-loader');
+const { SCRAPER_CONFIG_PATH, MS_PER_DAY } = require('./constants');
+
+const defaultRetryConfig = {
+  retries: { enablePeriodicRetry: true, periodicRetryInterval: 300000 },
+  dataQuality: { retryMessagesWithZeroSeen: true, retryMessagesOlderThanDays: 7 }
+};
 
 /**
  * Background service that periodically retries fetching missing message data
- * Runs every 5 minutes to ensure data accuracy
  */
 class MessageRetryService {
   constructor(scraperService, localDataStore) {
@@ -12,31 +16,7 @@ class MessageRetryService {
     this.localDataStore = localDataStore;
     this.retryInterval = null;
     this.isRunning = false;
-    this.config = this.loadConfig();
-  }
-
-  loadConfig() {
-    try {
-      const configPath = path.join(__dirname, 'scraper-config.json');
-      if (fs.existsSync(configPath)) {
-        const configData = fs.readFileSync(configPath, 'utf8');
-        return JSON.parse(configData);
-      }
-    } catch (error) {
-      logger.warn('Could not load scraper config, using defaults', { error: error.message });
-    }
-
-    // Default config
-    return {
-      retries: {
-        enablePeriodicRetry: true,
-        periodicRetryInterval: 300000 // 5 minutes
-      },
-      dataQuality: {
-        retryMessagesWithZeroSeen: true,
-        retryMessagesOlderThanDays: 7
-      }
-    };
+    this.config = loadJsonConfig(SCRAPER_CONFIG_PATH, defaultRetryConfig);
   }
 
   /**
@@ -165,7 +145,7 @@ class MessageRetryService {
    */
   findMessagesNeedingRetry(messages) {
     const now = new Date();
-    const cutoffDate = new Date(now - this.config.dataQuality.retryMessagesOlderThanDays * 24 * 60 * 60 * 1000);
+    const cutoffDate = new Date(now.getTime() - this.config.dataQuality.retryMessagesOlderThanDays * MS_PER_DAY);
 
     return messages.filter(msg => {
       // Skip very old messages (beyond retry threshold)

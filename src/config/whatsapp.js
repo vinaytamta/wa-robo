@@ -1,4 +1,5 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
+const path = require('path');
 const qrcode = require('qrcode-terminal');
 const QRCode = require('qrcode');
 const logger = require('../utils/logger');
@@ -30,23 +31,29 @@ class WhatsAppClient {
 
     logger.info('Creating WhatsApp client', { sessionName, headless });
 
+    const sessionPath = process.env.WWEBJS_AUTH_PATH || path.join(process.cwd(), '.wwebjs_auth');
+    const puppeteerOpts = {
+      headless: headless,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--disable-gpu'
+      ]
+    };
+    if (process.env.WA_CHROME_PATH) {
+      puppeteerOpts.executablePath = process.env.WA_CHROME_PATH;
+      logger.info('Using Chrome for WhatsApp', { executablePath: process.env.WA_CHROME_PATH });
+    }
     this.client = new Client({
       authStrategy: new LocalAuth({
         clientId: sessionName,
-        dataPath: './.wwebjs_auth'
+        dataPath: sessionPath
       }),
-      puppeteer: {
-        headless: headless,
-        args: [
-          '--no-sandbox',
-          '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage',
-          '--disable-accelerated-2d-canvas',
-          '--no-first-run',
-          '--no-zygote',
-          '--disable-gpu'
-        ]
-      },
+      puppeteer: puppeteerOpts,
       webVersionCache: {
         type: 'remote',
         remotePath: 'https://raw.githubusercontent.com/wppconnect-team/wa-version/main/html/2.2412.54.html'
