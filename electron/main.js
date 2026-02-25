@@ -1567,7 +1567,9 @@ function createWindow() {
     minWidth: 1200,
     minHeight: 700,
     title: 'GroupIQ',
-    backgroundColor: '#667eea',
+    backgroundColor: '#002060',
+    frame: false,
+    titleBarStyle: 'hidden',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       nodeIntegration: false,
@@ -1576,6 +1578,8 @@ function createWindow() {
     },
     show: false
   });
+
+  Menu.setApplicationMenu(null);
 
   // Load the local dashboard
   mainWindow.loadURL(`http://localhost:${localPort}`);
