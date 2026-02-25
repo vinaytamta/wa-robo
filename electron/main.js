@@ -169,11 +169,12 @@ function startLocalServer() {
       if (postingFocusedMode) {
         serveHtmlFile('autopost.html')(req, res);
       } else {
-        serveHtmlFile('index.html')(req, res);
+        serveHtmlFile('simple.html')(req, res);
       }
     });
     expressApp.get('/full-ui', serveHtmlFile('index.html'));
     expressApp.get('/posting-ui', serveHtmlFile('autopost.html'));
+    expressApp.get('/bulk', serveHtmlFile('bulk.html'));
 
     expressApp.use(express.static(publicDir, { index: false }));
 
@@ -659,6 +660,44 @@ function startLocalServer() {
         res.json({ success: true, jobs });
       } catch (error) {
         sendError(res, 400, error.message);
+      }
+    });
+
+    // ── Send Report ──────────────────────────────────────────────────────────
+    function buildReportCSV(jobs) {
+      const headers = ['ID', 'Group Name', 'Message', 'Scheduled At', 'Actual Send At', 'Status', 'Status Reason', 'Created At'];
+      const esc = v => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+      const rows = jobs.map(j => [
+        j.id,
+        (j.resolvedGroup && j.resolvedGroup.name) || j.groupName || '',
+        j.messageText || '',
+        j.scheduledAt || '',
+        j.actualSendAt || '',
+        j.status || '',
+        j.statusReason || '',
+        j.createdAt || '',
+      ].map(esc).join(','));
+      return [headers.join(','), ...rows].join('\n');
+    }
+
+    expressApp.get('/api/posting/report/download', async (req, res) => {
+      try {
+        const jobs = postQueueService.listJobs();
+        const csv = buildReportCSV(jobs);
+        const defaultPath = path.join(
+          app.getPath('downloads'),
+          `send-report-${new Date().toISOString().slice(0, 10)}.csv`
+        );
+        const { canceled, filePath } = await dialog.showSaveDialog({
+          title: 'Save Send Report',
+          defaultPath,
+          filters: [{ name: 'CSV', extensions: ['csv'] }],
+        });
+        if (canceled || !filePath) return res.json({ cancelled: true });
+        fs.writeFileSync(filePath, csv, 'utf8');
+        res.json({ success: true, path: filePath, count: jobs.length });
+      } catch (err) {
+        res.status(500).json({ success: false, error: err.message });
       }
     });
 
@@ -1584,9 +1623,6 @@ function createWindow() {
   // Show when ready
   mainWindow.once('ready-to-show', () => {
     mainWindow.show();
-    if (!app.isPackaged) {
-      mainWindow.webContents.openDevTools();
-    }
   });
 
   // Handle window close
@@ -1608,10 +1644,6 @@ function createWindow() {
     mainWindow = null;
   });
 
-  // Open DevTools in development
-  if (isDev) {
-    mainWindow.webContents.openDevTools();
-  }
 }
 
 // Create system tray

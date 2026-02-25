@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GroupIQ — Compose</title>
+    <link rel="stylesheet" href="/simple.css" />
+  </head>
+  <body>
+    <aside class="sidebar">
+      <div class="sidebar-logo">
+        <span class="logo-mark">G</span>
+        <span class="logo-text">GroupIQ</span>
+      </div>
+      <nav class="sidebar-nav">
+        <a href="/" class="nav-item active">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+          Compose
+        </a>
+        <a href="/bulk" class="nav-item">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+          Bulk Schedule
+        </a>
+      </nav>
+    </aside>
+
+    <main class="main-content">
+      <!-- Card 1: WhatsApp Connection -->
+      <section class="card" id="card-connection">
+        <div class="card-header">
+          <h2 class="card-title">WhatsApp Connection</h2>
+          <span id="wa-badge" class="pill pill-unknown">Unknown</span>
+        </div>
+        <div class="card-body">
+          <div id="wa-actions" class="btn-row">
+            <button id="btn-connect" class="btn btn-primary">Connect</button>
+            <button id="btn-disconnect" class="btn btn-outline" style="display:none">Disconnect</button>
+          </div>
+          <p id="wa-info" class="text-muted"></p>
+          <div id="qr-wrap" style="display:none">
+            <p class="text-muted" style="margin-bottom:8px">Scan with your phone to connect</p>
+            <img id="qr-img" src="" alt="WhatsApp QR code" class="qr-img" />
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 2: Compose Message -->
+      <section class="card" id="card-compose">
+        <div class="card-header">
+          <h2 class="card-title">Compose Message</h2>
+        </div>
+        <div class="card-body">
+          <div class="field">
+            <label class="field-label">Groups</label>
+            <div class="multiselect" id="ms-root">
+              <div class="multiselect-trigger" id="ms-trigger" tabindex="0">
+                <span id="ms-label">Select groups…</span>
+                <svg class="ms-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+              </div>
+              <div class="multiselect-dropdown" id="ms-dropdown" hidden>
+                <div class="ms-search-wrap">
+                  <input id="ms-search" type="text" class="ms-search-input" placeholder="Search groups…" autocomplete="off" />
+                </div>
+                <div id="ms-list" class="ms-list"></div>
+              </div>
+            </div>
+            <div id="chips-wrap" class="chips-wrap"></div>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="msg-text">Message</label>
+            <textarea id="msg-text" class="textarea" rows="4" placeholder="Type your message…"></textarea>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="msg-image">Image (optional)</label>
+            <div class="file-row">
+              <label class="btn btn-outline btn-sm file-label" for="msg-image">Choose file</label>
+              <input id="msg-image" type="file" accept="image/*" class="file-input" />
+              <span id="image-name" class="text-muted">No file chosen</span>
+              <button id="btn-clear-image" class="btn btn-outline btn-sm" style="display:none">✕</button>
+            </div>
+          </div>
+
+          <div class="field">
+            <label class="field-label">Send mode</label>
+            <div class="radio-row">
+              <label class="radio-label">
+                <input type="radio" name="send-mode" value="now" checked /> Send Now
+              </label>
+              <label class="radio-label">
+                <input type="radio" name="send-mode" value="schedule" /> Schedule
+              </label>
+            </div>
+          </div>
+
+          <div class="field" id="schedule-field" style="display:none">
+            <label class="field-label" for="schedule-at">Schedule date &amp; time</label>
+            <input id="schedule-at" type="datetime-local" class="input" />
+          </div>
+
+          <div id="compose-error" class="compose-error" style="display:none"></div>
+
+          <div class="btn-row">
+            <button id="btn-submit" class="btn btn-accent">Send Now</button>
+            <span id="submit-status" class="text-muted"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 3: Message Queue -->
+      <section class="card" id="card-queue">
+        <div class="card-header">
+          <h2 class="card-title">Message Queue</h2>
+        </div>
+        <div class="card-body">
+          <div class="tab-row" id="queue-tabs">
+            <button class="tab active" data-filter="">All</button>
+            <button class="tab" data-filter="scheduled">Scheduled</button>
+            <button class="tab" data-filter="sent">Sent</button>
+            <button class="tab" data-filter="failed">Failed</button>
+          </div>
+          <div class="table-wrap">
+            <table id="queue-table">
+              <thead>
+                <tr>
+                  <th>Group</th>
+                  <th>Message</th>
+                  <th>Time</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody id="queue-body">
+                <tr id="queue-empty-row">
+                  <td colspan="5" class="empty-cell">No messages yet.</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/simple.js"></script>
+  </body>
+</html>
